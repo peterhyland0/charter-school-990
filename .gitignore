@@ -1,0 +1,28 @@
+# Private context: research, interview prep, brief copies. Never commit.
+notes/
+CLAUDE.local.md
+
+# Data and build artifacts
+data/
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.zip
+*.xml
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+.vercel/
+
+# Secrets and OS
+.env
+.env.*
+!.env.example
+.DS_Store
