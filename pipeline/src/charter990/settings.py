@@ -27,3 +27,15 @@ IRS_XML_BASE = "https://apps.irs.gov/pub/epostcard/990/xml"
 OPERATING_STATUSES = {1, 3, 4, 5, 8}
 
 HTTP_HEADERS = {"User-Agent": "charter990-takehome/0.1"}
+
+# Statewide charter districts that hold unrelated schools under one NCES LEA:
+# the district is an authorizer, not a network, so its name and its other
+# schools say nothing about who runs a school in it.
+UMBRELLA_LEAIDS = (
+    "3200001",  # NV State Sponsored Charter Schools
+    "0800020",  # CO State Charter School Institute
+    "4503909",  # SC Charter Institute at Erskine
+    "4503901",  # SC Public Charter School District
+    "4700157",  # TN Public Charter School Commission
+    "4503919",  # SC Limestone Charters Association
+)

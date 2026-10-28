@@ -8,12 +8,15 @@ from .assets.match import school_matches
 from .assets.returns import raw_returns
 from .assets.zips import zip_members
 from .checks import (
+    corrections_hold,
     fetch_failure_rate,
     known_networks_in_pool,
+    known_roles,
     match_rate,
     no_support_groups_verified,
     operating_school_count,
     success_return_located,
+    umbrella_watch,
 )
 from .resources import PostgresResource
 
@@ -26,6 +29,9 @@ defs = Definitions(
         fetch_failure_rate,
         no_support_groups_verified,
         match_rate,
+        corrections_hold,
+        known_roles,
+        umbrella_watch,
     ],
     resources={"pg": PostgresResource(dsn=EnvVar("DATABASE_URL"))},
 )

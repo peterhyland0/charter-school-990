@@ -8,7 +8,13 @@ Five signals are computed in SQL for every school and candidate nonprofit:
   (in many states the charter district is the legal nonprofit)
 - phone: the same 10-digit phone number
 
+A sixth, district_group, spreads a verified link across a charter district:
+the district is one legal nonprofit, so its schools share it.
+
 A pair is verified when two or more signals agree and likely when one does.
+Among the nonprofits tied for a school's best tier, ordered rules decide which
+one runs the school and what the others are (management, support, affiliate).
+Hand corrections are applied last, so they always win and survive reruns.
 Every operating school gets a status, and unmatched schools get a reason.
 """
 
@@ -17,7 +23,8 @@ from collections import Counter
 from dagster import MaterializeResult, asset
 
 from ..resources import PostgresResource
-from ..util import EXCLUDED_DOMAINS, GENERIC_WORDS
+from ..settings import UMBRELLA_LEAIDS
+from ..util import EXCLUDED_DOMAINS, GENERIC_WORDS, US_STATES
 from .ccd import ccd_schools
 from .extract import parsed_filings
 
@@ -33,6 +40,10 @@ SHARED_PHONE_FILERS = 5
 # States whose charter schools are governed by school districts by law, so
 # most have no separate nonprofit (NEPC; CCD shows no charter districts there).
 DISTRICT_GOVERNED_STATES = ["AK", "KS", "MD", "VA"]
+# A tied nonprofit whose name is this much closer to the school's name wins.
+NAME_TIE_MARGIN = 0.1
+# Entities that belong to a network but don't run its schools.
+SUPPORT_NAME = r"\m(FOUNDATION|FACILITY|FACILITIES|HOLDING|HOLDINGS|LENDER|REAL ESTATE|PROPERTY|PROPERTIES|BUILDING)\M"
 
 # Names are compared on their distinctive words (name_core drops CHARTER,
 # SCHOOL, ACADEMY and the like) against the filer's name and its DBA; the
@@ -47,8 +58,9 @@ CROSS JOIN LATERAL (
 # Two names whose numbers differ (ICAHN 1 versus ICAHN 4) are different schools.
 NUMS_AGREE = "(s.nums = '' OR f.nums = '' OR s.nums = f.nums)"
 # A name whose only distinctive word is its city ("BROOKLYN CHARTER SCHOOL")
-# says nothing about which organisation it is.
-DISTINCTIVE = "(s.core <> coalesce(s.ucity, '') AND f.core <> coalesce(f.ucity, ''))"
+# or its state ("TEXAS COLLEGE PREP") says nothing about which organisation it is.
+DISTINCTIVE = """(s.core <> coalesce(s.ucity, '') AND f.core <> coalesce(f.ucity, '')
+    AND s.core NOT IN (SELECT core FROM states) AND f.core NOT IN (SELECT core FROM states))"""
 
 SETUP = [
     # Cities are compared in upper case: about a quarter of returns write them
@@ -65,16 +77,23 @@ SETUP = [
     "ANALYZE lf",
     """CREATE TEMP TABLE ops ON COMMIT DROP AS
        SELECT *, name_core(name_key, %(generic)s) AS core, name_core(lea_name_key, %(generic)s) AS lea_core,
-              name_nums(name_key) AS nums, upper(lcity) AS ucity
+              name_nums(name_key) AS nums, upper(lcity) AS ucity,
+              leaid = ANY(%(umbrella_leaids)s) AS umbrella
        FROM schools WHERE is_operating""",
+    """CREATE TEMP TABLE states ON COMMIT DROP AS
+       SELECT code, name, name_core(name, %(generic)s) AS core
+       FROM unnest(%(state_codes)s::text[], %(state_names)s::text[]) AS t(code, name)""",
     "CREATE TEMP TABLE cand (ncessch text, ein text, object_id text, signal text, evidence jsonb) ON COMMIT DROP",
+    # Active hand corrections for operating schools.
+    """CREATE TEMP TABLE corr ON COMMIT DROP AS
+       SELECT c.* FROM match_corrections c JOIN ops s USING (ncessch) WHERE c.retired_at IS NULL""",
 ]
 
 SIGNALS = {
     "website": """
         WITH umbrella AS (
             SELECT website_domain FROM lf WHERE website_domain IS NOT NULL
-            GROUP BY 1 HAVING count(*) > %(umbrella)s
+            GROUP BY 1 HAVING count(*) > %(umbrella_filers)s
         )
         INSERT INTO cand
         SELECT s.ncessch, f.ein, f.object_id, 'website',
@@ -102,15 +121,21 @@ SIGNALS = {
         {NAME_SIM}
         WHERE x.sim >= %(city_sim)s AND {NUMS_AGREE} AND {DISTINCTIVE}
     """,
+    # Statewide umbrella districts are authorizers, not networks, so their
+    # names say nothing about who runs a school. A district named for a
+    # university (University of Texas University Charter School) matches the
+    # university's law school and foundations, which don't run schools.
     "district_name": """
         WITH d AS (
             SELECT DISTINCT st, lea_name, lea_name_key, lea_core FROM ops
-            WHERE lea_type = '7' AND lea_core IS NOT NULL
+            WHERE lea_type = '7' AND NOT umbrella AND lea_core IS NOT NULL
+              AND lea_core NOT IN (SELECT core FROM states)
         ),
         dm AS (
             SELECT d.st, d.lea_name_key, d.lea_name, f.ein, f.object_id, f.org_name,
                    similarity(d.lea_core, f.core) AS sim
             FROM d JOIN lf f ON f.state = d.st AND f.core %% d.lea_core
+            WHERE f.org_name !~* '\\mUNIVERSITY OF\\M'
         )
         INSERT INTO cand
         SELECT s.ncessch, dm.ein, dm.object_id, 'district_name',
@@ -134,36 +159,147 @@ SIGNALS = {
     """,
 }
 
-BUILD_MATCHES = """
-    CREATE TEMP TABLE pairs ON COMMIT DROP AS
-    SELECT ncessch, ein, min(object_id) AS object_id,
-           array_agg(DISTINCT signal ORDER BY signal) AS signals,
-           jsonb_object_agg(signal, evidence) AS evidence
-    FROM cand GROUP BY ncessch, ein;
+# Pairs and their tiers from the candidate signals. Run twice: once for the
+# five direct signals, then again after district_group is added. Hand
+# corrections that remove a link go first, so the removed nonprofit neither
+# spreads across a district nor takes part in deciding roles.
+BUILD_PAIRS = [
+    """DELETE FROM cand USING corr c
+       WHERE cand.ncessch = c.ncessch AND (c.action = 'none' OR (c.action = 'unlink' AND cand.ein = c.ein))""",
+    # An umbrella district's own nonprofit authorizes its schools; it doesn't
+    # run them, even when a school lists its phone number.
+    """DELETE FROM cand USING ops s, lf f
+       WHERE cand.ncessch = s.ncessch AND cand.object_id = f.object_id
+         AND s.umbrella AND similarity(f.core, s.lea_core) >= %(district_sim)s""",
+    "DROP TABLE IF EXISTS pairs",
+    """CREATE TEMP TABLE pairs ON COMMIT DROP AS
+       SELECT ncessch, ein, min(object_id) AS object_id,
+              array_agg(DISTINCT signal ORDER BY signal) AS signals,
+              jsonb_object_agg(signal, evidence) AS evidence
+       FROM cand GROUP BY ncessch, ein""",
+    # The same ZIP implies the same city, so don't count the name twice.
+    """UPDATE pairs SET signals = array_remove(signals, 'name_city')
+       WHERE 'name_zip' = ANY(signals) AND 'name_city' = ANY(signals)""",
+]
 
-    -- The same ZIP implies the same city, so don't count the name twice.
-    UPDATE pairs SET signals = array_remove(signals, 'name_city')
-    WHERE 'name_zip' = ANY(signals) AND 'name_city' = ANY(signals);
-
-    INSERT INTO school_matches (ncessch, ein, object_id, method, tier, evidence, signals, ambiguous)
-    WITH t AS (
-        SELECT p.*, CASE WHEN cardinality(signals) >= 2 THEN 'verified' ELSE 'likely' END AS tier,
-               CASE WHEN cardinality(signals) >= 2 THEN 1 ELSE 2 END AS rank
-        FROM pairs p
-    ),
-    r AS (SELECT t.*, min(rank) OVER (PARTITION BY ncessch) AS best_rank FROM t)
-    SELECT ncessch, ein, object_id, 'signals', tier, evidence, signals,
-           count(*) FILTER (WHERE rank = best_rank) OVER (PARTITION BY ncessch) > 1
-    FROM r;
+# A charter district is one legal nonprofit, so a nonprofit verified for one
+# of its schools is evidence for the others. Only in-state, non-support
+# nonprofits spread: IDEA's Arkansas affiliate is verified for three Texas
+# schools by phone, which says nothing about the other 130.
+DISTRICT_GROUP = """
+    WITH verified AS (
+        SELECT s.leaid, s.lea_name, p.ein, p.object_id, count(*) AS n
+        FROM pairs p JOIN ops s USING (ncessch) JOIN lf f ON f.object_id = p.object_id
+        WHERE cardinality(p.signals) >= 2 AND s.lea_type = '7' AND NOT s.umbrella
+          AND f.state = s.st AND f.org_name !~* %(support_name)s
+        GROUP BY 1, 2, 3, 4
+    )
+    INSERT INTO cand
+    SELECT s.ncessch, v.ein, v.object_id, 'district_group',
+           jsonb_build_object('district', v.lea_name, 'verified_schools', v.n - coalesce(own.self, 0))
+    FROM ops s JOIN verified v ON v.leaid = s.leaid
+    LEFT JOIN LATERAL (
+        SELECT 1 AS self FROM pairs p
+        WHERE p.ncessch = s.ncessch AND p.ein = v.ein AND cardinality(p.signals) >= 2
+    ) own ON true
+    -- At least one verified school other than this one.
+    WHERE v.n - coalesce(own.self, 0) >= 1
 """
 
+# Role facts for every pair, then ordered rules among the pairs tied for each
+# school's best tier. Each rule only sets pairs aside when some tied pair
+# survives it, so a school never loses its last candidate.
+ROLES = [
+    f"""CREATE TEMP TABLE r ON COMMIT DROP AS
+        SELECT p.*, CASE WHEN cardinality(p.signals) >= 2 THEN 'verified' ELSE 'likely' END AS tier,
+               cardinality(p.signals) >= 2 AS strong,
+               -- In the school's state, and not named for another state.
+               f.state = s.st AND NOT EXISTS (
+                   SELECT 1 FROM states x WHERE x.code <> s.st AND (' ' || f.name_key || ' ') LIKE ('%% ' || x.name || ' %%')
+               ) AS in_state,
+               f.org_name ~* %(support_name)s AS support,
+               f.mgmt_delegated AS delegates,
+               similarity(s.name_key, f.name_key) AS name_sim,
+               NULL::text AS role
+        FROM pairs p JOIN ops s USING (ncessch) JOIN lf f ON f.object_id = p.object_id""",
+    """UPDATE r SET role = 'other'
+       WHERE NOT strong AND EXISTS (SELECT 1 FROM r x WHERE x.ncessch = r.ncessch AND x.strong)""",
+    """UPDATE r SET role = 'affiliate'
+       WHERE role IS NULL AND NOT in_state
+         AND EXISTS (SELECT 1 FROM r x WHERE x.ncessch = r.ncessch AND x.role IS NULL AND x.in_state)""",
+    # The remaining rules only choose among nonprofits in the school's own
+    # state. When every candidate is out of state (a network's filers based
+    # elsewhere), the school's own operator isn't on file: leave it ambiguous.
+    """CREATE TEMP TABLE home ON COMMIT DROP AS
+       SELECT DISTINCT ncessch FROM r WHERE role IS NULL AND in_state""",
+    """UPDATE r SET role = 'support'
+       WHERE role IS NULL AND support AND ncessch IN (SELECT ncessch FROM home)
+         AND EXISTS (SELECT 1 FROM r x WHERE x.ncessch = r.ncessch AND x.role IS NULL AND NOT x.support)""",
+    # Some tied nonprofits delegate management and some don't: the ones that
+    # delegate run schools, and the ones they delegate to manage them.
+    """UPDATE r SET role = 'management'
+       WHERE role IS NULL AND delegates IS FALSE AND ncessch IN (SELECT ncessch FROM home)
+         AND EXISTS (SELECT 1 FROM r x WHERE x.ncessch = r.ncessch AND x.role IS NULL AND x.delegates)""",
+    # A nonprofit the school points at directly (website, phone, name) beats
+    # one that only shares a name with the school's district.
+    """UPDATE r SET role = 'related'
+       WHERE role IS NULL AND signals <@ %(indirect)s AND ncessch IN (SELECT ncessch FROM home)
+         AND EXISTS (SELECT 1 FROM r x WHERE x.ncessch = r.ncessch AND x.role IS NULL
+                     AND NOT x.signals <@ %(indirect)s)""",
+    """WITH ranked AS (
+           SELECT ncessch, ein, name_sim,
+                  row_number() OVER (PARTITION BY ncessch ORDER BY name_sim DESC, ein) AS pos,
+                  lead(name_sim) OVER (PARTITION BY ncessch ORDER BY name_sim DESC, ein) AS runner_up
+           FROM r WHERE role IS NULL AND ncessch IN (SELECT ncessch FROM home)
+       ),
+       decided AS (
+           SELECT ncessch, ein FROM ranked
+           WHERE pos = 1 AND runner_up IS NOT NULL AND name_sim - runner_up >= %(name_margin)s
+       )
+       UPDATE r SET role = 'related'
+       FROM decided d
+       WHERE r.ncessch = d.ncessch AND r.role IS NULL AND r.ein <> d.ein""",
+    "UPDATE r SET role = 'operator' WHERE role IS NULL",
+    """INSERT INTO school_matches (ncessch, ein, object_id, method, tier, evidence, signals, ambiguous, role, source)
+       SELECT ncessch, ein, object_id, 'signals', tier, evidence, signals,
+              count(*) FILTER (WHERE role = 'operator') OVER (PARTITION BY ncessch) > 1, role, 'auto'
+       FROM r""",
+]
+
+# Hand links, applied after roles so they always win. (Unlinks and "no
+# nonprofit" were applied to the candidates.) A link to a nonprofit the
+# matcher didn't find is added with its latest filing.
+LINK_CORRECTIONS = [
+    """INSERT INTO school_matches (ncessch, ein, object_id, method, tier, evidence, signals, ambiguous, role, source)
+       SELECT c.ncessch, c.ein, f.object_id, 'correction', 'verified', '{}', '{}', false, 'operator', 'corrected'
+       FROM corr c JOIN lf f ON f.ein = c.ein
+       WHERE c.action = 'link'
+       ON CONFLICT (ncessch, ein) DO NOTHING""",
+    # The hand-linked nonprofit runs the school; any other operator is demoted.
+    """UPDATE school_matches m
+       SET role = CASE WHEN c.ein = m.ein THEN 'operator' ELSE 'related' END,
+           tier = CASE WHEN c.ein = m.ein THEN 'verified' ELSE m.tier END,
+           source = CASE WHEN c.ein = m.ein THEN 'corrected' ELSE m.source END,
+           evidence = CASE WHEN c.ein = m.ein
+                           THEN m.evidence || jsonb_build_object('correction', jsonb_build_object(
+                                'id', c.id, 'note', c.note, 'by', c.created_by, 'at', c.created_at))
+                           ELSE m.evidence END
+       FROM corr c
+       WHERE c.action = 'link' AND m.ncessch = c.ncessch AND (m.ein = c.ein OR m.role = 'operator')""",
+    # Recompute ambiguity for schools a correction touched.
+    """UPDATE school_matches m SET ambiguous = x.n > 1
+       FROM (SELECT ncessch, count(*) FILTER (WHERE role = 'operator') AS n FROM school_matches GROUP BY 1) x
+       WHERE x.ncessch = m.ncessch AND m.ncessch IN (SELECT ncessch FROM corr)""",
+]
+
 BUILD_STATUS = """
-    INSERT INTO school_status (ncessch, status, n_candidates, reason, detail)
+    INSERT INTO school_status (ncessch, status, n_candidates, reason, detail, corrected)
     SELECT s.ncessch,
            coalesce(m.best, 'unmatched'),
            coalesce(m.n, 0),
            CASE
                WHEN m.best IS NOT NULL THEN NULL
+               WHEN c.ncessch IS NOT NULL THEN 'corrected_none'
                WHEN s.st = ANY(%(district_states)s) THEN 'district_governed_state'
                -- The IRS filing requirement code says why a registered
                -- nonprofit has no 990 or 990-EZ on file.
@@ -175,23 +311,26 @@ BUILD_STATUS = """
            END,
            jsonb_strip_nulls(jsonb_build_object(
                'has_website', s.website_domain IS NOT NULL,
-               'nonprofit_ein', pf.ein, 'nonprofit_name', pf.name, 'filing_req_cd', pf.filing_req_cd))
+               'nonprofit_ein', pf.ein, 'nonprofit_name', pf.name, 'filing_req_cd', pf.filing_req_cd,
+               'correction_note', c.note)),
+           EXISTS (SELECT 1 FROM corr x WHERE x.ncessch = s.ncessch)
     FROM ops s
     LEFT JOIN (
         SELECT ncessch, CASE WHEN bool_or(tier = 'verified') THEN 'verified' ELSE 'likely' END AS best,
                count(*) AS n
         FROM school_matches GROUP BY ncessch
     ) m USING (ncessch)
+    LEFT JOIN corr c ON c.ncessch = s.ncessch AND c.action = 'none'
     LEFT JOIN LATERAL (
         -- A registered nonprofit that matches by name and ZIP but has no 990 or
         -- 990-EZ in the 2025 or 2026 index.
         SELECT b.ein, b.name, b.filing_req_cd FROM bmf_orgs b
-        WHERE m.best IS NULL AND b.zip5 = s.zip5
+        WHERE m.best IS NULL AND c.ncessch IS NULL AND b.zip5 = s.zip5
           AND NOT EXISTS (SELECT 1 FROM irs_index i WHERE i.ein = b.ein)
           AND greatest(similarity(s.core, name_core(b.name_key, %(generic)s)),
                        coalesce(similarity(s.core, name_core(b.sort_name_key, %(generic)s)), 0)) >= %(zip_sim)s
           AND (s.nums = '' OR name_nums(b.name_key) = '' OR s.nums = name_nums(b.name_key))
-          AND s.core <> coalesce(s.ucity, '')
+          AND s.core <> coalesce(s.ucity, '') AND s.core NOT IN (SELECT core FROM states)
         ORDER BY similarity(s.core, name_core(b.name_key, %(generic)s)) DESC
         LIMIT 1
     ) pf ON true
@@ -199,36 +338,52 @@ BUILD_STATUS = """
 
 PARAMS = {
     "generic": list(GENERIC_WORDS),
+    "state_codes": list(US_STATES),
+    "state_names": list(US_STATES.values()),
+    "umbrella_leaids": list(UMBRELLA_LEAIDS),
     "excluded": sorted(EXCLUDED_DOMAINS),
-    "umbrella": UMBRELLA_DOMAIN_FILERS,
+    "umbrella_filers": UMBRELLA_DOMAIN_FILERS,
     "shared_phone": SHARED_PHONE_FILERS,
     "zip_sim": NAME_ZIP_SIMILARITY,
     "city_sim": NAME_CITY_SIMILARITY,
     "district_sim": DISTRICT_NAME_SIMILARITY,
     "district_states": DISTRICT_GOVERNED_STATES,
+    "support_name": SUPPORT_NAME,
+    "name_margin": NAME_TIE_MARGIN,
+    "indirect": ["district_name", "district_group"],
 }
 
 
-@asset(group_name="pipeline", deps=[ccd_schools, parsed_filings], description="School-to-nonprofit links from five signals, plus a status for every school.")
+def _run(conn, statements) -> None:
+    for sql in statements:
+        # Pass parameters only to statements that use them.
+        conn.execute(sql, PARAMS if "%(" in sql else None)
+
+
+@asset(group_name="pipeline", deps=[ccd_schools, parsed_filings], description="School-to-nonprofit links from six signals, each nonprofit's role, hand corrections, and a status for every school.")
 def school_matches(pg: PostgresResource) -> MaterializeResult:
     with pg.connect() as conn:
         conn.execute("TRUNCATE school_matches, school_status")
-        for statement in SETUP:
-            conn.execute(statement, PARAMS if "%(" in statement else None)
+        _run(conn, SETUP)
         # Lets the gin index serve the district-name % (similarity) operator.
         conn.execute(f"SET LOCAL pg_trgm.similarity_threshold = {DISTRICT_NAME_SIMILARITY}")
         signal_rows = {}
         for name, sql in SIGNALS.items():
-            # Pass parameters only to statements that use them.
             signal_rows[name] = conn.execute(sql, PARAMS if "%(" in sql else None).rowcount
-        conn.execute(BUILD_MATCHES)
+        _run(conn, BUILD_PAIRS)
+        signal_rows["district_group"] = conn.execute(DISTRICT_GROUP, PARAMS).rowcount
+        _run(conn, BUILD_PAIRS)
+        _run(conn, ROLES)
+        _run(conn, LINK_CORRECTIONS)
         conn.execute(BUILD_STATUS, PARAMS)
 
         statuses = dict(conn.execute("SELECT status, count(*) FROM school_status GROUP BY 1").fetchall())
         reasons = dict(conn.execute(
             "SELECT reason, count(*) FROM school_status WHERE status = 'unmatched' GROUP BY 1"
         ).fetchall())
+        roles = dict(conn.execute("SELECT role, count(*) FROM school_matches GROUP BY 1").fetchall())
         (ambiguous,) = conn.execute("SELECT count(DISTINCT ncessch) FROM school_matches WHERE ambiguous").fetchone()
+        (corrections,) = conn.execute("SELECT count(*) FROM corr").fetchone()
         signal_use = Counter(dict(conn.execute(
             "SELECT unnest(signals), count(*) FROM school_matches GROUP BY 1"
         ).fetchall()))
@@ -242,8 +397,10 @@ def school_matches(pg: PostgresResource) -> MaterializeResult:
         "unmatched": statuses.get("unmatched", 0),
         "match_rate": round(matched / operating, 4) if operating else 0.0,
         "ambiguous_schools": ambiguous,
+        "corrections_applied": corrections,
     }
     metadata.update({f"reason_{k}": v for k, v in reasons.items()})
+    metadata.update({f"role_{k}": v for k, v in roles.items()})
     metadata.update({f"pairs_with_{k}": v for k, v in signal_use.items()})
     metadata.update({f"candidate_rows_{k}": v for k, v in signal_rows.items()})
     return MaterializeResult(metadata=metadata)

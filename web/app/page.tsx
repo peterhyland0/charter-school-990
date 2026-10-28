@@ -22,11 +22,14 @@ function likePattern(q: string): string {
 }
 
 async function Summary() {
-  const [row] = await sql<{ total: string; verified: string; likely: string; unmatched: string; states: string }[]>`
+  const [row] = await sql<
+    { total: string; verified: string; likely: string; unmatched: string; corrected: string; states: string }[]
+  >`
     SELECT count(*) AS total,
            count(*) FILTER (WHERE status = 'verified') AS verified,
            count(*) FILTER (WHERE status = 'likely') AS likely,
            count(*) FILTER (WHERE status = 'unmatched') AS unmatched,
+           count(*) FILTER (WHERE corrected) AS corrected,
            (SELECT count(DISTINCT st) FROM schools WHERE is_operating) AS states
     FROM school_status`;
   const n = (v: string) => Number(v).toLocaleString("en-US");
@@ -34,6 +37,7 @@ async function Summary() {
     <p className="mt-1 mb-4 text-sm opacity-70">
       {n(row.total)} operating charter schools in {row.states} states · {n(row.verified)} verified ·{" "}
       {n(row.likely)} likely · {n(row.unmatched)} unmatched
+      {Number(row.corrected) > 0 && ` · ${n(row.corrected)} corrected by hand`}
     </p>
   );
 }
@@ -49,9 +53,10 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
     q || st
       ? await sql<Row[]>`
           SELECT s.ncessch, s.sch_name, s.lcity, s.st, s.is_operating, ss.status,
-                 (SELECT string_agg(DISTINCT f.org_name, '; ')
+                 -- The nonprofit(s) that run the school; several when it's ambiguous.
+                 (SELECT string_agg(DISTINCT f.org_name, ' or ')
                     FROM school_matches m JOIN filings f ON f.object_id = m.object_id
-                   WHERE m.ncessch = s.ncessch) AS nonprofits,
+                   WHERE m.ncessch = s.ncessch AND m.role = 'operator') AS nonprofits,
                  count(*) OVER () AS total
           FROM schools s
           LEFT JOIN school_status ss ON ss.ncessch = s.ncessch
@@ -109,7 +114,7 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
                 {r.lcity}, {r.st}
                 {!r.is_operating && " · not operating"}
                 {" · "}
-                {r.nonprofits ?? "No nonprofit matched"}
+                {r.nonprofits ? `Run by ${r.nonprofits}` : "No nonprofit matched"}
               </div>
             </li>
           ))}

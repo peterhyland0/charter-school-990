@@ -8,7 +8,7 @@ from .assets.match import school_matches
 from .assets.returns import SELECT_LATEST, raw_returns
 from .assets.zips import zip_members
 from .resources import PostgresResource
-from .settings import STATE_FILTER
+from .settings import STATE_FILTER, UMBRELLA_LEAIDS
 from .util import is_support_org
 
 # Operating charter schools in the CCD SY 2025-26 preliminary file.
@@ -32,6 +32,21 @@ KNOWN_NETWORK_EINS = {
 }
 MAX_FAILURE_RATE = 0.05
 MIN_MATCH_RATE = 0.5
+# Role expectations for known networks: (school website, EIN, expected role).
+KNOWN_ROLES = [
+    ("ideapublicschools.org", "TX", "742948339", "operator"),       # IDEA Public Schools
+    ("successacademies.org", "NY", "364629540", "operator"),        # Success Academy Charter Schools - NYC
+    ("successacademies.org", "NY", "205298861", "management"),      # Success Academy Charter Schools Inc
+]
+# Nonprofits that must never be linked: (EIN, why).
+NEVER_LINKED = {
+    "750917417": "Texas College, a university, not Texas College Preparatory Academies",
+}
+# A charter district whose schools are run by this many different operators
+# (counting only schools with one clear operator) is probably a statewide
+# umbrella (an authorizer) that UMBRELLA_LEAIDS misses.
+UMBRELLA_WATCH_SCHOOLS = 10
+UMBRELLA_WATCH_OPERATORS = 5
 
 
 @asset_check(asset=ccd_schools, description="Operating charter count matches the CCD file.")
@@ -104,4 +119,87 @@ def match_rate(pg: PostgresResource) -> AssetCheckResult:
         passed=rate >= MIN_MATCH_RATE,
         severity=AssetCheckSeverity.WARN,
         metadata={"matched": matched, "operating": total, "rate": round(rate, 4)},
+    )
+
+
+@asset_check(asset=school_matches, description="Every active hand correction is reflected in the matches.")
+def corrections_hold(pg: PostgresResource) -> AssetCheckResult:
+    with pg.connect() as conn:
+        rows = conn.execute(
+            """SELECT c.id, c.action, c.ncessch, c.ein, s.is_operating,
+                      CASE c.action
+                          WHEN 'link' THEN EXISTS (SELECT 1 FROM school_matches m WHERE m.ncessch = c.ncessch
+                                                   AND m.ein = c.ein AND m.role = 'operator' AND m.source = 'corrected')
+                          WHEN 'unlink' THEN NOT EXISTS (SELECT 1 FROM school_matches m
+                                                         WHERE m.ncessch = c.ncessch AND m.ein = c.ein)
+                          ELSE EXISTS (SELECT 1 FROM school_status st WHERE st.ncessch = c.ncessch
+                                       AND st.reason = 'corrected_none')
+                      END AS holds
+               FROM match_corrections c LEFT JOIN schools s USING (ncessch)
+               WHERE c.retired_at IS NULL"""
+        ).fetchall()
+    orphaned = [r[0] for r in rows if not r[4]]
+    broken = [r[0] for r in rows if r[4] and not r[5]]
+    return AssetCheckResult(
+        passed=not broken,
+        metadata={
+            "active": len(rows),
+            "not_applied": ", ".join(map(str, broken)) or "none",
+            # The school closed or NCES renumbered it: the correction no longer applies.
+            "school_gone": ", ".join(map(str, orphaned)) or "none",
+        },
+    )
+
+
+@asset_check(asset=school_matches, description="Known networks get the expected roles, and known wrong links stay out.")
+def known_roles(pg: PostgresResource) -> AssetCheckResult:
+    problems = []
+    with pg.connect() as conn:
+        for domain, st, ein, role in KNOWN_ROLES:
+            if STATE_FILTER not in (None, st):
+                continue
+            found = dict(conn.execute(
+                """SELECT m.role, count(*) FROM school_matches m JOIN schools s USING (ncessch)
+                   WHERE s.website_domain = %s AND s.st = %s AND m.ein = %s GROUP BY 1""",
+                (domain, st, ein),
+            ).fetchall())
+            if set(found) != {role}:
+                problems.append(f"{ein} on {domain} schools: expected {role}, got {found or 'no link'}")
+        for ein, why in NEVER_LINKED.items():
+            (n,) = conn.execute("SELECT count(*) FROM school_matches WHERE ein = %s", (ein,)).fetchone()
+            if n:
+                problems.append(f"{ein} linked to {n} schools ({why})")
+        # An umbrella district's own nonprofit (the Charter Institute at Erskine)
+        # authorizes its schools and must not be linked to them.
+        (n,) = conn.execute(
+            """SELECT count(*) FROM school_matches m JOIN schools s USING (ncessch) JOIN filings f USING (object_id)
+               WHERE s.leaid = ANY(%s) AND similarity(upper(f.org_name), upper(s.lea_name)) >= 0.7""",
+            (list(UMBRELLA_LEAIDS),),
+        ).fetchone()
+        if n:
+            problems.append(f"{n} schools linked to their umbrella district's own nonprofit")
+    return AssetCheckResult(
+        passed=not problems,
+        severity=AssetCheckSeverity.WARN,
+        metadata={"problems": "; ".join(problems) or "none"},
+    )
+
+
+@asset_check(asset=school_matches, description="No charter district outside the umbrella list looks like a statewide authorizer.")
+def umbrella_watch(pg: PostgresResource) -> AssetCheckResult:
+    with pg.connect() as conn:
+        suspects = conn.execute(
+            """SELECT s.st, s.lea_name, s.leaid, count(DISTINCT s.ncessch) AS schools, count(DISTINCT m.ein) AS operators
+               FROM schools s JOIN school_matches m ON m.ncessch = s.ncessch AND m.role = 'operator' AND NOT m.ambiguous
+               WHERE s.is_operating AND s.lea_type = '7' AND NOT (s.leaid = ANY(%s))
+               GROUP BY 1, 2, 3
+               HAVING count(DISTINCT s.ncessch) >= %s AND count(DISTINCT m.ein) >= %s
+               ORDER BY operators DESC""",
+            (list(UMBRELLA_LEAIDS), UMBRELLA_WATCH_SCHOOLS, UMBRELLA_WATCH_OPERATORS),
+        ).fetchall()
+    return AssetCheckResult(
+        passed=not suspects,
+        severity=AssetCheckSeverity.WARN,
+        metadata={"suspects": "; ".join(f"{st} {name} ({leaid}): {n} schools, {k} operators"
+                                        for st, name, leaid, n, k in suspects) or "none"},
     )

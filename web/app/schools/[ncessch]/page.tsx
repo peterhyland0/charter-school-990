@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { sql } from "@/lib/db";
 import { day, formatEin, money, propublicaUrl } from "@/lib/format";
-import { reasonText, SIGNAL_LABEL, STATUS_CLASS, STATUS_LABEL, type Status } from "@/lib/labels";
+import { reasonText, ROLE_LABEL, SIGNAL_LABEL, STATUS_CLASS, STATUS_LABEL, type Role, type Status } from "@/lib/labels";
 
 type School = {
   ncessch: string;
@@ -24,6 +24,8 @@ type Evidence = Record<string, Record<string, string | number | null>>;
 type Match = {
   ein: string;
   tier: "verified" | "likely";
+  role: Role;
+  source: "auto" | "corrected";
   signals: string[];
   ambiguous: boolean;
   evidence: Evidence;
@@ -51,11 +53,16 @@ type Person = {
   total: string;
 };
 
-function managementLabel(m: Match): string {
+function managementLabel(m: Match, managers: Match[]): string {
   if (m.return_type === "990EZ") return "Not asked on Form 990-EZ";
   if (m.mgmt_delegated === null) return "Not answered";
-  return m.mgmt_delegated ? "Yes, management duties are delegated" : "No";
+  if (!m.mgmt_delegated) return "No";
+  const names = managers.map((x) => x.org_name).join(" or ");
+  return names ? `Yes, management duties are delegated, likely to ${names}` : "Yes, management duties are delegated";
 }
+
+// Cards first for the nonprofits a rep acts on, then everything else.
+const FULL_CARD: Role[] = ["operator", "management"];
 
 type StatusRow = { status: Status; reason: string | null; detail: Record<string, string | boolean> };
 
@@ -73,6 +80,8 @@ function signalDetail(signal: string, e: Record<string, string | number | null> 
       return `district "${e.district}" vs "${e.filing}" (similarity ${e.similarity})`;
     case "phone":
       return `both list ${String(e.phone).replace(/(\d{3})(\d{3})(\d{4})/, "($1) $2-$3")}`;
+    case "district_group":
+      return `${e.verified_schools} other school${e.verified_schools === 1 ? "" : "s"} in ${e.district} verified to this nonprofit`;
     default:
       return "";
   }
@@ -85,22 +94,28 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
 
   const [status] = await sql<StatusRow[]>`SELECT status, reason, detail FROM school_status WHERE ncessch = ${ncessch}`;
   const matches = await sql<Match[]>`
-    SELECT m.ein, m.tier, m.signals, m.ambiguous, m.evidence, f.object_id, f.org_name, f.return_type,
+    SELECT m.ein, m.tier, m.role, m.source, m.signals, m.ambiguous, m.evidence, f.object_id, f.org_name, f.return_type,
            f.tax_period_begin, f.tax_period_end, f.return_ts, f.amended,
            f.total_revenue, f.mgmt_delegated, f.source_zip, b.state AS filer_state
     FROM school_matches m
     JOIN filings f ON f.object_id = m.object_id
     LEFT JOIN bmf_orgs b ON b.ein = m.ein
     WHERE m.ncessch = ${ncessch}
-    ORDER BY (m.tier = 'verified') DESC, cardinality(m.signals) DESC,
+    ORDER BY array_position(ARRAY['operator', 'management', 'support', 'affiliate', 'related', 'other'], m.role),
+             (m.tier = 'verified') DESC, cardinality(m.signals) DESC,
              (b.state = ${school.st}) DESC NULLS LAST, f.total_revenue DESC NULLS LAST`;
 
-  const people = matches.length
+  const cards = matches.filter((m) => FULL_CARD.includes(m.role));
+  const others = matches.filter((m) => !FULL_CARD.includes(m.role));
+  const managers = matches.filter((m) => m.role === "management");
+  const operators = matches.filter((m) => m.role === "operator").length;
+
+  const people = cards.length
     ? await sql<Person[]>`
         SELECT object_id, name, title, avg_hours, comp_org, comp_related, comp_other,
                (coalesce(comp_org, 0) + coalesce(comp_related, 0) + coalesce(comp_other, 0))::text AS total
         FROM filing_people
-        WHERE object_id IN ${sql(matches.map((m) => m.object_id))}
+        WHERE object_id IN ${sql(cards.map((m) => m.object_id))}
         ORDER BY object_id, (coalesce(comp_org, 0) + coalesce(comp_related, 0) + coalesce(comp_other, 0)) DESC, seq`
     : [];
 
@@ -141,23 +156,37 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
         </section>
       )}
 
-      {matches.some((m) => m.ambiguous) && (
+      {operators > 1 && (
         <p className="mt-6 rounded bg-amber-500/10 p-3 text-sm">
-          More than one nonprofit matches equally well. Often one runs the school and another is its network or
-          management organization; check the signals below.
+          {operators} nonprofits match equally well and the data can&apos;t tell which one runs this school. Check
+          the evidence below; a confirmed answer can be recorded as a hand correction.
         </p>
       )}
 
-      {matches.map((m) => {
+      {cards.map((m) => {
         const rows = people.filter((p) => p.object_id === m.object_id);
+        const correction = m.evidence.correction;
         return (
           <section key={m.ein} className="mt-6 rounded border border-black/15 p-4 dark:border-white/20">
+            <p className="text-xs font-medium uppercase tracking-wide opacity-60">{ROLE_LABEL[m.role]}</p>
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h2 className="text-lg font-semibold">{m.org_name}</h2>
-              <span className={`rounded px-2 py-0.5 text-xs ${STATUS_CLASS[m.tier]}`}>
-                {STATUS_LABEL[m.tier]} match
+              <span className="flex gap-2">
+                {m.source === "corrected" && (
+                  <span className="rounded bg-sky-600/15 px-2 py-0.5 text-xs text-sky-700 dark:text-sky-300">
+                    Set by hand
+                  </span>
+                )}
+                <span className={`rounded px-2 py-0.5 text-xs ${STATUS_CLASS[m.tier]}`}>
+                  {STATUS_LABEL[m.tier]} match
+                </span>
               </span>
             </div>
+            {correction && (
+              <p className="mt-1 text-sm opacity-80">
+                Corrected by {correction.by} on {day(new Date(String(correction.at)))}: {correction.note}
+              </p>
+            )}
             <p className="text-sm opacity-70">
               EIN {formatEin(m.ein)}
               {m.filer_state && ` · registered in ${m.filer_state}`}
@@ -180,10 +209,12 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
                 <dt className="opacity-70">Total revenue</dt>
                 <dd>{money(m.total_revenue)}</dd>
               </div>
-              <div>
-                <dt className="opacity-70">Management company</dt>
-                <dd>{managementLabel(m)}</dd>
-              </div>
+              {m.role === "operator" && (
+                <div>
+                  <dt className="opacity-70">Management company decides?</dt>
+                  <dd>{managementLabel(m, managers)}</dd>
+                </div>
+              )}
             </dl>
 
             <h3 className="mt-5 font-medium">Leaders and pay</h3>
@@ -230,6 +261,42 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
           </section>
         );
       })}
+
+      {others.length > 0 && (
+        <section className="mt-6">
+          <h2 className="font-semibold">Also linked</h2>
+          <p className="text-sm opacity-70">Other nonprofits the evidence connects to this school, and how.</p>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left text-sm">
+              <thead className="opacity-70">
+                <tr>
+                  <th className="py-1 pr-3 font-medium">Nonprofit</th>
+                  <th className="py-1 pr-3 font-medium">Role</th>
+                  <th className="py-1 pr-3 font-medium">Evidence</th>
+                  <th className="py-1 text-right font-medium">Revenue</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-black/10 dark:divide-white/10">
+                {others.map((m) => (
+                  <tr key={m.ein}>
+                    <td className="py-1 pr-3">
+                      <a href={propublicaUrl(m.ein, m.object_id)} className="underline" target="_blank" rel="noreferrer">
+                        {m.org_name}
+                      </a>
+                      <span className="opacity-60"> · {formatEin(m.ein)}{m.filer_state && `, ${m.filer_state}`}</span>
+                    </td>
+                    <td className="py-1 pr-3">{ROLE_LABEL[m.role]}</td>
+                    <td className="py-1 pr-3">
+                      {STATUS_LABEL[m.tier]}: {m.signals.map((sig) => SIGNAL_LABEL[sig] ?? sig).join(", ")}
+                    </td>
+                    <td className="py-1 text-right">{money(m.total_revenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </main>
   );
 }

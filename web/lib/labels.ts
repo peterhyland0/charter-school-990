@@ -18,13 +18,33 @@ export const SIGNAL_LABEL: Record<string, string> = {
   name_city: "Name + city",
   district_name: "Charter district name",
   phone: "Phone",
+  district_group: "Same charter district",
 };
 
-type Detail = { has_website?: boolean; nonprofit_ein?: string; nonprofit_name?: string; filing_req_cd?: string };
+export type Role = "operator" | "management" | "support" | "affiliate" | "related" | "other";
+
+export const ROLE_LABEL: Record<Role, string> = {
+  operator: "Runs this school",
+  management: "Management organization",
+  support: "Network support entity (foundation, facilities or lender)",
+  affiliate: "Same network, another state",
+  related: "Related, less likely to run this school",
+  other: "Weaker match",
+};
+
+type Detail = {
+  has_website?: boolean;
+  nonprofit_ein?: string;
+  nonprofit_name?: string;
+  filing_req_cd?: string;
+  correction_note?: string;
+};
 
 export function reasonText(reason: string | null, detail: Detail): string {
   const nonprofit = detail.nonprofit_name ?? "a nonprofit";
   switch (reason) {
+    case "corrected_none":
+      return `Set by hand: this school has no nonprofit of its own. Note: ${detail.correction_note ?? "none"}`;
     case "district_governed_state":
       return "Charter schools in this state are governed by school districts, so there is usually no separate nonprofit to find.";
     case "postcard_filer":
