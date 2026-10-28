@@ -56,7 +56,7 @@ adjudicate:  ## Decide ambiguous and unmatched schools with the scored model and
 NEON_ENV = set -a && . $(CURDIR)/.env.neon && set +a && \
 	case "$$NEON_DATABASE_URL" in *neon.tech*) ;; \
 	  *) echo "NEON_DATABASE_URL missing or not a Neon URL: check .env.neon (quote the value)" >&2; exit 1 ;; esac
-CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people filing_contractors school_matches school_status match_corrections external_links adjudications related_links
+CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people filing_contractors school_matches school_status match_corrections external_links school_governance adjudications related_links
 
 # The first load only. Once live, the scheduled pipeline keeps Neon current and
 # hand corrections are made there, so a reload would replace them with the
@@ -90,10 +90,10 @@ neon-sync-filings:  ## Apply migrations to Neon, then copy the parsed returns fr
 	) | psql -q -1 -v ON_ERROR_STOP=1 -o /dev/null "$$NEON_DATABASE_URL" && echo "synced: $(SYNC_TABLES)"
 
 # What the matcher and adjudicators read besides the returns: the candidate
-# pool and its index rows, the external holder evidence, and the stored
-# decisions (so Neon's adjudicators don't ask Jev again). Run before
-# neon-rematch. One transaction, like the returns.
-EVIDENCE_TABLES = bmf_orgs irs_index external_links adjudications
+# pool and its index rows, the external holder evidence, the state records of
+# district-run charters, and the stored decisions (so Neon's adjudicators
+# don't ask Jev again). Run before neon-rematch. One transaction, like the returns.
+EVIDENCE_TABLES = bmf_orgs irs_index external_links school_governance adjudications
 neon-sync-evidence:  ## Apply migrations to Neon, then copy the pool, external evidence and adjudications from local
 	@$(NEON_ENV) && DATABASE_URL="$$NEON_DATABASE_URL" $(MAKE) -s db
 	@$(NEON_ENV) && ( \
