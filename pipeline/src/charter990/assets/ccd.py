@@ -65,8 +65,10 @@ def ccd_schools(pg: PostgresResource) -> MaterializeResult:
         ))
 
     with pg.connect() as conn:
-        # Matches and statuses reference schools and are rebuilt on every run.
-        pg.replace_table(conn, "schools", COLUMNS, rows, cascade=True)
+        # Synced in place rather than reloaded: the live site keeps its matches
+        # until school_matches rebuilds them, even if a step in between fails.
+        removed = pg.sync_table(conn, "schools", "ncessch", COLUMNS, rows,
+                                dependents=("school_matches", "school_status"))
         pg.replace_table(conn, "district_domains", ("domain",), [(d,) for d in district_domains])
 
     return MaterializeResult(metadata={
@@ -78,4 +80,5 @@ def ccd_schools(pg: PostgresResource) -> MaterializeResult:
         "operating_in_charter_districts": in_charter_lea,
         "states": len({r[6] for r in rows}),
         "district_domains": len(district_domains),
+        "schools_removed": removed,
     })

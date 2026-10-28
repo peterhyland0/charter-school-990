@@ -32,15 +32,17 @@ much faster.
 
 The same code runs live; only `DATABASE_URL` changes.
 
-- **Database:** Neon, Postgres 17, AWS US East. Loaded once from a local run with
-  `make neon-load`, then kept current by the scheduled pipeline.
+- **Database:** Neon, Postgres 18, AWS US East. Loaded once from a local run with
+  `make neon-load`, which refuses to overwrite a database that already has data.
 - **Website:** Vercel, deployed from this repo with Root Directory `web`.
   `DATABASE_URL` is Neon's pooled connection string for a read-only `web_reader` role
   (`make neon-roles`). Every push to `main` redeploys.
-- **Pipeline:** Dagster on a small Ubuntu server (`deploy/setup.sh`): a webserver
-  bound to localhost and a daemon that runs `monthly_refresh` at 06:00 UTC on the 3rd.
-  The schedule is on only where `CHARTER990_SCHEDULE=on`. Reach the UI with
-  `ssh -L 3070:localhost:3070 root@<server>`.
+- **Pipeline:** packaged for a small Ubuntu server (`deploy/setup.sh`), not yet
+  running there. It would run a Dagster webserver bound to localhost, and a daemon
+  that runs `monthly_refresh` at 06:00 UTC on the 3rd. The schedule is on only where
+  `CHARTER990_SCHEDULE=on`. You'd reach the UI with
+  `ssh -L 3070:localhost:3070 root@<server>`. Until then, `make pipeline` with
+  `DATABASE_URL` pointing at Neon does the same refresh.
 
 Copy `.env.neon.example` to `.env.neon` for the `neon-*` targets. Add `NEON=1` to a
 correction command to fix a match in the live database.

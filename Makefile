@@ -2,6 +2,8 @@
 DB ?= charter990
 export DATABASE_URL ?= postgresql://localhost/$(DB)
 export DAGSTER_HOME := $(CURDIR)/pipeline/.dagster_home
+# Settings come from here, not a pipeline/.env file: the Dagster CLI loads .env
+# over the environment, which would send NEON=1 corrections to the local database.
 DAGSTER_PORT ?= 3070
 
 .PHONY: db pipeline dagster web test correct unlink no-nonprofit corrections retire neon-load neon-check neon-reader neon-roles neon-rematch server-sync
@@ -34,14 +36,27 @@ test:
 	cd pipeline && uv run pytest -q
 
 # Live database. .env.neon (never committed) holds NEON_DATABASE_URL, Neon's
-# direct owner connection string. You run these targets; nothing here prints it.
-NEON_ENV = set -a && . $(CURDIR)/.env.neon && set +a
+# direct owner connection string, in double quotes: unquoted, the & in Neon's
+# URLs ends the assignment and the variable comes out empty. Every target
+# refuses to run unless it got a Neon URL, so psql never falls back to the
+# local database by accident.
+NEON_ENV = set -a && . $(CURDIR)/.env.neon && set +a && \
+	case "$$NEON_DATABASE_URL" in *neon.tech*) ;; \
+	  *) echo "NEON_DATABASE_URL missing or not a Neon URL: check .env.neon (quote the value)" >&2; exit 1 ;; esac
 CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people school_matches school_status match_corrections
 
-neon-load:  ## Copy the local database into Neon, replacing what's there
-	@$(NEON_ENV) && pg_dump --no-owner --no-acl --no-comments --clean --if-exists "$(DATABASE_URL)" \
-	  | psql -q -v ON_ERROR_STOP=1 -o /dev/null "$$NEON_DATABASE_URL"
-	@echo "loaded; run make neon-check"
+# The first load only. Once live, the scheduled pipeline keeps Neon current and
+# hand corrections are made there, so a reload would replace them with the
+# local copy and briefly break the site. FORCE=1 overrides.
+neon-load:  ## First load: copy the local database into an empty Neon database
+	@$(NEON_ENV) && \
+	  live=$$(psql -qAt "$$NEON_DATABASE_URL" -c "SELECT CASE WHEN to_regclass('public.schools') IS NULL THEN -1 ELSE (SELECT count(*) FROM match_corrections WHERE retired_at IS NULL) END") && \
+	  if [ "$$live" != "-1" ] && [ -z "$$FORCE" ]; then \
+	    echo "Neon already has data ($$live active corrections). Refusing to replace it; FORCE=1 to override." >&2; exit 1; \
+	  fi && \
+	  pg_dump --no-owner --no-acl --no-comments --clean --if-exists "$(DATABASE_URL)" \
+	    | psql -q -v ON_ERROR_STOP=1 -o /dev/null "$$NEON_DATABASE_URL" && \
+	  echo "loaded; run make neon-check"
 
 neon-check:  ## Row counts, local versus Neon
 	@$(NEON_ENV) && for t in $(CHECK_TABLES); do \
@@ -51,10 +66,16 @@ neon-check:  ## Row counts, local versus Neon
 	done
 
 # Create web_reader in SQL, not in the Neon console or CLI: Neon makes those
-# roles members of neon_superuser, which can write every table.
-neon-reader:  ## Create the read-only web_reader role; prints its pooled URL for Vercel
+# roles members of neon_superuser, which can write every table. Rerunning
+# rotates the password. The password goes to psql on stdin (printf is a shell
+# builtin), so it never appears in the process list.
+neon-reader:  ## Create web_reader or rotate its password; prints its pooled URL for Vercel
 	@$(NEON_ENV) && PW=$$(openssl rand -hex 24) && \
-	  psql -q -v ON_ERROR_STOP=1 "$$NEON_DATABASE_URL" -c "CREATE ROLE web_reader LOGIN PASSWORD '$$PW'" && \
+	  printf "SELECT 'CREATE ROLE web_reader LOGIN' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'web_reader') \\gexec\nALTER ROLE web_reader WITH LOGIN PASSWORD '%s';\n" "$$PW" \
+	    | psql -q -v ON_ERROR_STOP=1 -o /dev/null "$$NEON_DATABASE_URL" && \
+	  if [ -n "$$(psql -qAt "$$NEON_DATABASE_URL" -c "SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid JOIN pg_roles u ON u.oid = m.member WHERE u.rolname = 'web_reader' AND r.rolname = 'neon_superuser'")" ]; then \
+	    echo "web_reader belongs to neon_superuser (made in the console or CLI), so it can write. Delete it and rerun." >&2; exit 1; \
+	  fi && \
 	  psql -q -v ON_ERROR_STOP=1 "$$NEON_DATABASE_URL" -f db/roles/web_reader.sql && \
 	  echo "DATABASE_URL for Vercel (pooled, read-only):" && \
 	  echo "$$NEON_DATABASE_URL" | sed -E "s#//[^@]+@([^.]+)#//web_reader:$$PW@\1-pooler#"

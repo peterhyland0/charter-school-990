@@ -38,9 +38,10 @@ KNOWN_ROLES = [
     ("successacademies.org", "NY", "364629540", "operator"),        # Success Academy Charter Schools - NYC
     ("successacademies.org", "NY", "205298861", "management"),      # Success Academy Charter Schools Inc
 ]
-# Known operators of single schools: (school name, state, EIN).
+# Known operators of single schools, by NCES id, which survives renames:
+# (NCES id, state, EIN).
 KNOWN_OPERATORS = [
-    ("Summit Academy - Toledo", "OH", "731685362"),  # one of 21 Summit campus nonprofits on one site
+    ("390049605206", "OH", "731685362"),  # Summit Academy - Toledo, one of 21 campus nonprofits on one site
 ]
 # Nonprofits that must never be linked: (EIN, why).
 NEVER_LINKED = {
@@ -174,16 +175,15 @@ def known_roles(pg: PostgresResource) -> AssetCheckResult:
             ).fetchall())
             if set(found) != {role}:
                 problems.append(f"{ein} on {domain} schools: expected {role}, got {found or 'no link'}")
-        for name, st, ein in KNOWN_OPERATORS:
+        for ncessch, st, ein in KNOWN_OPERATORS:
             if STATE_FILTER not in (None, st):
                 continue
             (n,) = conn.execute(
-                """SELECT count(*) FROM school_matches m JOIN schools s USING (ncessch)
-                   WHERE s.sch_name = %s AND s.st = %s AND m.ein = %s AND m.role = 'operator'""",
-                (name, st, ein),
+                "SELECT count(*) FROM school_matches WHERE ncessch = %s AND ein = %s AND role = 'operator'",
+                (ncessch, ein),
             ).fetchone()
             if not n:
-                problems.append(f"{name} ({st}) not run by {ein}")
+                problems.append(f"school {ncessch} ({st}) not run by {ein}")
         for ein, why in NEVER_LINKED.items():
             (n,) = conn.execute("SELECT count(*) FROM school_matches WHERE ein = %s", (ein,)).fetchone()
             if n:

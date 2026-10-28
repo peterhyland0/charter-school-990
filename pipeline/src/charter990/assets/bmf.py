@@ -91,7 +91,7 @@ def bmf_candidates(pg: PostgresResource) -> MaterializeResult:
         ))
 
     with pg.connect() as conn:
-        pg.replace_table(conn, "bmf_orgs", COLUMNS, rows)
+        pg.replace_table(conn, "bmf_orgs", COLUMNS, rows, live=True)  # the website reads filer states
 
     return MaterializeResult(metadata={
         "pool_size": len(rows),

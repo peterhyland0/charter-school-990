@@ -50,7 +50,7 @@ DISTRICT_GOVERNED_STATES = ["AK", "KS", "MD", "VA"]
 # bodies corporate with governmental-agency status (MCL 380.501). Wisconsin
 # was checked and left out: each district decides per school (Wis. Stat.
 # 118.40(7)). New Mexico was left out for lack of a primary source.
-PUBLIC_BODY_STATES = ["MI"]
+PUBLIC_BODY_STATES = {"MI": "MCL 380.501"}
 # A tied nonprofit whose name is this much closer to the school's name wins.
 NAME_TIE_MARGIN = 0.1
 # network_site: the best-named nonprofit on a shared site needs at least this
@@ -371,12 +371,12 @@ BUILD_STATUS = """
                WHEN m.best IS NOT NULL THEN NULL
                WHEN c.ncessch IS NOT NULL THEN 'corrected_none'
                WHEN s.st = ANY(%(district_states)s) THEN 'district_governed_state'
-               WHEN s.st = ANY(%(public_body_states)s) THEN 'public_body_state'
                -- The IRS filing requirement code says why a registered
                -- nonprofit has no 990 or 990-EZ on file.
                WHEN pf.filing_req_cd = '02' THEN 'postcard_filer'
                WHEN pf.filing_req_cd IN ('00', '06', '07', '13', '14') THEN 'not_required_to_file'
                WHEN pf.ein IS NOT NULL THEN 'no_recent_return'
+               WHEN pb.law IS NOT NULL THEN 'public_body_state'
                -- The school's own site is its regular district's: probably
                -- run by the district, with no separate nonprofit.
                WHEN s.website_domain IN (SELECT domain FROM district_domains) THEN 'uses_district_website'
@@ -386,7 +386,7 @@ BUILD_STATUS = """
            jsonb_strip_nulls(jsonb_build_object(
                'has_website', s.website_domain IS NOT NULL,
                'nonprofit_ein', pf.ein, 'nonprofit_name', pf.name, 'filing_req_cd', pf.filing_req_cd,
-               'correction_note', c.note)),
+               'correction_note', c.note, 'state_law', pb.law)),
            EXISTS (SELECT 1 FROM corr x WHERE x.ncessch = s.ncessch)
     FROM ops s
     LEFT JOIN (
@@ -395,6 +395,7 @@ BUILD_STATUS = """
         FROM school_matches GROUP BY ncessch
     ) m USING (ncessch)
     LEFT JOIN corr c ON c.ncessch = s.ncessch AND c.action = 'none'
+    LEFT JOIN unnest(%(public_body_codes)s::text[], %(public_body_laws)s::text[]) AS pb(code, law) ON pb.code = s.st
     LEFT JOIN LATERAL (
         -- A registered nonprofit that matches by name and ZIP but has no 990 or
         -- 990-EZ in the 2025 or 2026 index.
@@ -422,7 +423,8 @@ PARAMS = {
     "city_sim": NAME_CITY_SIMILARITY,
     "district_sim": DISTRICT_NAME_SIMILARITY,
     "district_states": DISTRICT_GOVERNED_STATES,
-    "public_body_states": PUBLIC_BODY_STATES,
+    "public_body_codes": list(PUBLIC_BODY_STATES),
+    "public_body_laws": list(PUBLIC_BODY_STATES.values()),
     "support_name": SUPPORT_NAME,
     "name_margin": NAME_TIE_MARGIN,
     "indirect": ["district_name", "district_group"],
@@ -440,7 +442,10 @@ def _run(conn, statements) -> None:
 @asset(group_name="pipeline", deps=[ccd_schools, parsed_filings], description="School-to-nonprofit links from six signals, each nonprofit's role, hand corrections, and a status for every school.")
 def school_matches(pg: PostgresResource) -> MaterializeResult:
     with pg.connect() as conn:
-        conn.execute("TRUNCATE school_matches, school_status")
+        # DELETE, not TRUNCATE: the live site keeps showing the previous matches
+        # until this transaction commits the new ones.
+        conn.execute("DELETE FROM school_matches")
+        conn.execute("DELETE FROM school_status")
         _run(conn, SETUP)
         # Lets the gin index serve the district-name % (similarity) operator.
         conn.execute(f"SET LOCAL pg_trgm.similarity_threshold = {DISTRICT_NAME_SIMILARITY}")

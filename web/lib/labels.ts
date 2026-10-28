@@ -39,6 +39,7 @@ type Detail = {
   nonprofit_name?: string;
   filing_req_cd?: string;
   correction_note?: string;
+  state_law?: string;
 };
 
 export function reasonText(reason: string | null, detail: Detail): string {
@@ -55,7 +56,7 @@ export function reasonText(reason: string | null, detail: Detail): string {
     case "no_recent_return":
       return `A nonprofit with a matching name and ZIP, ${nonprofit}, normally files a Form 990, but none was published in 2025 or 2026. Its return may be late or not yet released.`;
     case "public_body_state":
-      return "Charter schools in Michigan are government bodies under state law (MCL 380.501), not nonprofits, so most have no Form 990 to find.";
+      return `Charter schools in this state are government bodies under state law (${detail.state_law ?? "state statute"}), not nonprofits, so most have no Form 990 to find.`;
     case "uses_district_website":
       return "This school lists its school district's website, so it is probably run by the district and has no separate nonprofit.";
     case "inside_regular_district":

@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@neon/config": "^1.9.5",
-    "@neon/env": "^1.6.6",
     "next": "16.4.3",
     "postgres": "^3.4.9",
     "react": "19.3.0",

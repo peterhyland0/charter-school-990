@@ -33,9 +33,15 @@ fi
 as_app sh -c "ssh-keyscan -t ed25519 github.com 2>/dev/null >> $HOME_DIR/.ssh/known_hosts && sort -u -o $HOME_DIR/.ssh/known_hosts $HOME_DIR/.ssh/known_hosts"
 
 if [ ! -d "$APP/.git" ]; then
-  if ! as_app git ls-remote "$REPO" >/dev/null 2>&1; then
-    echo "Add this key to the GitHub repo (Settings > Deploy keys, read-only), then rerun:"
-    cat "$KEY.pub"
+  if ! err=$(as_app git ls-remote "$REPO" 2>&1 >/dev/null); then
+    # Only a refused key means the deploy key is missing; say so for anything else.
+    if printf '%s' "$err" | grep -qiE "permission denied \(publickey\)|repository not found"; then
+      echo "Add this key to the GitHub repo (Settings > Deploy keys, read-only), then rerun:"
+      cat "$KEY.pub"
+    else
+      echo "Can't reach $REPO:" >&2
+      echo "$err" >&2
+    fi
     exit 1
   fi
   mkdir -p "$APP" && chown charter990: "$APP"
