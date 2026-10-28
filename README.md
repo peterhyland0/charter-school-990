@@ -17,7 +17,7 @@ make pipeline  # download sources and run every Dagster asset
 make web       # lookup site at http://localhost:3000
 ```
 
-`make dagster` opens the Dagster UI at http://localhost:3001. `make test` runs the
+`make dagster` opens the Dagster UI at http://localhost:3070. `make test` runs the
 pipeline's unit tests.
 
 ## Layout
