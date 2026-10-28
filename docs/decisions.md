@@ -41,7 +41,7 @@ What was decided, why, and what it costs. Numbers are from the current national 
 
 ## Stack
 
-- **Python with Dagster assets, Postgres, and Next.js with TypeScript,** as in the job description. Neon and Vercel host it. Dagster provides reruns, 9 checks that fail or warn loudly, and the monthly schedule. A rerun from cache takes about a minute and fetches only new returns.
+- **Python with Dagster assets, Postgres, and Next.js with TypeScript,** as in the job description. Neon and Vercel host it. Dagster provides reruns and 9 checks that fail or warn loudly. A rerun from cache takes about a minute, and it fetches only returns it hasn't seen, so a monthly rerun keeps the data current. The schedule that triggers it is not wired up yet.
 
 ## Known limits
 
