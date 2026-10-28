@@ -9,6 +9,8 @@
 #   DATABASE_URL=<Neon direct owner connection string>
 #   DAGSTER_HOME=/var/lib/charter990/dagster_home
 #   CHARTER990_SCHEDULE=on
+#   ADJUDICATOR=both          (apply the picks the scored model and Jev agree on)
+#   JEV_API_KEY=...           (optional: without it Jev isn't asked about new schools)
 set -euo pipefail
 
 REPO=${REPO:?set REPO to the repo SSH URL}

@@ -3,6 +3,9 @@ SHELL := /bin/bash
 DB ?= charter990
 export DATABASE_URL ?= postgresql://localhost/$(DB)
 export DAGSTER_HOME := $(CURDIR)/pipeline/.dagster_home
+# Apply the adjudicators' agreed picks (scored model and Jev) on every run;
+# ADJUDICATOR= (empty) keeps them in shadow mode, scored or jev applies one method.
+export ADJUDICATOR ?= both
 # Settings come from here, not a pipeline/.env file: the Dagster CLI loads .env
 # over the environment, which would send NEON=1 corrections to the local database.
 DAGSTER_PORT ?= 3070
@@ -126,10 +129,10 @@ neon-reader:  ## Create web_reader or rotate its password; prints its pooled URL
 neon-roles:  ## Re-apply web_reader's read-only grants
 	@$(NEON_ENV) && psql -q -v ON_ERROR_STOP=1 "$$NEON_DATABASE_URL" -f db/roles/web_reader.sql && echo "web_reader can read"
 
-neon-rematch:  ## Rebuild only the matches and their Schedule R links in Neon from this Mac
+neon-rematch:  ## Rebuild the matches, their Schedule R links and the adjudicators' applied picks in Neon
 	@mkdir -p $(DAGSTER_HOME) && touch $(DAGSTER_HOME)/dagster.yaml
 	@$(NEON_ENV) && cd pipeline && DATABASE_URL="$$NEON_DATABASE_URL" \
-	  uv run dagster asset materialize -m charter990.definitions --select school_matches,related_orgs,related_links
+	  uv run dagster asset materialize -m charter990.definitions --select school_matches,related_orgs,related_links,adjudications
 
 server-sync:  ## Copy the cached downloads to the server: make server-sync HOST=root@<ip>
 	rsync -az data/raw/ "$(HOST):/opt/charter990/data/raw/"
