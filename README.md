@@ -5,6 +5,8 @@ its IRS Form 990, and extracts who leads it, what they are paid, its finances, a
 whether a management company runs it. Every fact links to the filing it came from,
 and the pipeline refreshes as the IRS posts new e-file batches.
 
+**Live: https://web-five-wine-54.vercel.app**
+
 Status: live. The lookup site runs on Vercel against a Neon Postgres database,
 covering every state. Schools are matched to filers by website, name and ZIP, name and
 city, charter district name, phone, a network website shared by campus nonprofits, and
