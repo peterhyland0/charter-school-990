@@ -18,7 +18,10 @@ that runs schools, from its own return and from any return that lists it:
   school, or shares paid staff with it: sibling campuses and network offices.
 Government bodies (an authorizing district, a university), foundations,
 facilities and lending companies, parent groups and unrelated businesses
-(a hospital, an investment fund) are left out.
+(a hospital, an investment fund) are left out, as is an organisation a
+return calls inactive or dissolved, unless it files a current return of its
+own: ResponsiveEd Texas calls ResponsiveEd Arkansas "inactive", but Arkansas
+reports $26M of revenue for the year to June 2025.
 
 The 512(b)(13) "controlled entity" box is not used: in 426 pairs of school
 nonprofits each claims to control the other.
@@ -158,6 +161,9 @@ PARENT_GROUP_NAME = r"\m(FRIENDS OF|AMIGOS DE|PTA|PTO|PTSA|BOOSTERS?|ALUMNI|PARE
 SUPPORT_ACTIVITY = r"\m(REAL ESTATE|FACILIT|LEAS|LEND|LOAN|PROPERT|HOUSING|FUNDRAIS|HOLDING|BUILDING|INVEST)"
 MANAGEMENT_ACTIVITY = r"(MANAGEMENT|MGMT|\mEMO\M|\mCMO\M|ADMINISTRATIVE SERV|ADMIN SUP)"
 SCHOOL_ACTIVITY = r"(CHARTER|SCHOOL|EDUCAT|ACADEM|LEARNING|\mPREP\M)"
+# Matched against the name and the activity, as in "Troy Prep Foundation Inc
+# (dissolved in FY25)" on Uncommon's return.
+INACTIVE = r"\m(INACTIV|DISSOLV|DEFUNCT)"
 
 LINKS = [
     """CREATE TEMP TABLE ops ON COMMIT DROP AS
@@ -195,6 +201,8 @@ LINKS = [
               coalesce(min(f.org_name), mode() WITHIN GROUP (ORDER BY e.related_name)) AS related_name,
               max(e.activity) AS activity,
               bool_or(e.controlled_by_us) AS controlled_by_us,
+              coalesce(bool_or(upper(e.related_name) ~ %(inactive)s OR upper(e.activity) ~ %(inactive)s), false)
+                  AND count(f.ein) = 0 AS inactive,
               greatest(sum(t.amount) FILTER (WHERE e.side = 'own' AND t.type ~ 'm'),
                        sum(t.amount) FILTER (WHERE e.side = 'theirs' AND t.type ~ 'l')) AS services_amt,
               coalesce(bool_or((e.side = 'own' AND t.type ~ 'm') OR (e.side = 'theirs' AND t.type ~ 'l')), false) AS services,
@@ -213,6 +221,7 @@ LINKS = [
        SELECT * FROM (
            SELECT p.ein, p.related_ein, p.related_name,
                   CASE
+                      WHEN p.inactive THEN NULL
                       WHEN upper(p.related_name) ~ %(government)s OR p.activity ~* 'GOVERNMENT' THEN NULL
                       WHEN upper(p.related_name) ~ %(support)s OR upper(p.related_name) ~ %(parent_group)s
                            OR upper(p.related_name) ~ %(support_activity)s
@@ -245,6 +254,7 @@ LINK_PARAMS = {
     "support_activity": SUPPORT_ACTIVITY,
     "management_activity": MANAGEMENT_ACTIVITY,
     "school_activity": SCHOOL_ACTIVITY,
+    "inactive": INACTIVE,
 }
 
 

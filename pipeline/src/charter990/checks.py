@@ -345,6 +345,9 @@ def known_managers_named(pg: PostgresResource) -> AssetCheckResult:
 KNOWN_RELATED = [
     ("OH", "731685362", "341938197", "management"),  # Summit Academy - Toledo, by Summit Academy Management
     ("NY", "834247585", "203971209", "management"),  # KIPP NYC Public Charter Schools, by KIPP New York
+    # ResponsiveEd Texas calls ResponsiveEd Arkansas "inactive", but Arkansas
+    # files its own return with $26M of revenue.
+    ("TX", "752748762", "752822219", "network"),
 ]
 # Related organisations that must never be linked: (EIN, why).
 NEVER_RELATED = {
