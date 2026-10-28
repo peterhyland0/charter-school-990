@@ -1,6 +1,6 @@
 # Design decisions
 
-What was decided, why, and what it costs. Numbers are from the current national run: 8,129 operating charter schools in 47 states. 3,484 are verified, 1,912 likely and 2,733 unmatched.
+What was decided, why, and what it costs. Numbers are from the current national run: 8,129 operating charter schools in 44 states, DC, Puerto Rico and Guam. 3,484 are verified, 1,912 likely and 2,733 unmatched.
 
 ## Data
 
@@ -10,7 +10,7 @@ What was decided, why, and what it costs. Numbers are from the current national 
   - **IRS school codes.**
   - **A network name matching a charter school or district,** such as KIPP or Great Hearts. Big networks often aren't coded as schools.
 
-  Boosters, PTAs and alumni groups are dropped. The result is 57,024 nonprofits and 27,003 parsed returns.
+  Support groups like boosters and PTAs are left out, because they share a school's name but don't run it. The result is 57,024 nonprofits and 27,003 parsed returns.
 
 ## Matching
 
@@ -46,6 +46,11 @@ What was decided, why, and what it costs. Numbers are from the current national 
   Of returns that say yes, 96% name the manager in at least one place. Mater Academy's names Academica Dade LLC, an "educational service provider" paid $10.5M. A contractor counts by its service description; property, food, construction and investment management don't.
 - **Finances carry their line numbers, and each school says when the next return is due,** so June 2025 figures aren't presented as current.
 - **No public "suggest a match" button yet.** The site reads through a role that can't write. A suggestion box needs its own insert-only table, spam protection and a review step, so corrections stay with `make correct` for now.
+
+## Lists and exports
+
+- **One query serves the list page, the CSV and the JSON,** one row per school, so they can't disagree. Search also matches the nonprofit and management company behind a school ("Academica" finds 68).
+- **The CSV is spreadsheet-safe:** formula-like cells are guarded, and Excel reads accents. "Top-paid leader" skips unpaid board members, who are often the only people listed when a management company employs the staff.
 
 ## Corrections
 

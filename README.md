@@ -51,6 +51,12 @@ The same code runs live; only `DATABASE_URL` changes.
 Copy `.env.neon.example` to `.env.neon` for the `neon-*` targets. Add `NEON=1` to a
 correction command to fix a match in the live database.
 
+## Lists, CSV and JSON
+
+- `/schools`: filter by state, match status, management company and operator revenue. "Download CSV" exports the same rows. Filters live in the URL, e.g. `/schools?st=FL&managed=yes`.
+- `/api/schools?…`: the same list as JSON, 500 rows per page with a `next` link. Add `format=csv` for a spreadsheet.
+- `/api/schools/<NCES id>`: everything on a school's page, as JSON. Unknown ids return 404.
+
 ## Fixing a match
 
 A correction is stored in Postgres and applied last on every run, so it always wins

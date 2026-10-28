@@ -2,69 +2,9 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import { Suspense } from "react";
-import { sql } from "@/lib/db";
 import { day, formatEin, money, month, nextReturn, propublicaUrl } from "@/lib/format";
-import { reasonText, ROLE_LABEL, SIGNAL_LABEL, STATUS_CLASS, STATUS_LABEL, type Role, type Status } from "@/lib/labels";
-
-type School = {
-  ncessch: string;
-  sch_name: string;
-  lea_name: string | null;
-  lstreet1: string | null;
-  lcity: string | null;
-  st: string;
-  lzip: string | null;
-  phone: string | null;
-  website: string | null;
-  website_domain: string | null;
-  is_operating: boolean;
-};
-
-type Evidence = Record<string, Record<string, string | number | null>>;
-
-type Match = {
-  ein: string;
-  tier: "verified" | "likely";
-  role: Role;
-  source: "auto" | "corrected";
-  signals: string[];
-  ambiguous: boolean;
-  evidence: Evidence;
-  object_id: string;
-  org_name: string | null;
-  return_type: string;
-  tax_period_begin: Date | null;
-  tax_period_end: Date | null;
-  return_ts: Date | null;
-  amended: boolean;
-  total_revenue: string | null;
-  total_expenses: string | null;
-  total_assets: string | null;
-  net_assets: string | null;
-  mgmt_delegated: boolean | null;
-  mgmt_explanation: string | null;
-  source_zip: string;
-  filer_state: string | null;
-};
-
-type Person = {
-  object_id: string;
-  name: string | null;
-  title: string | null;
-  avg_hours: string | null;
-  comp_org: string | null;
-  comp_related: string | null;
-  comp_other: string | null;
-  total: string;
-};
-
-type Contractor = {
-  object_id: string;
-  name: string | null;
-  services: string | null;
-  compensation: string | null;
-  is_management: boolean;
-};
+import { reasonText, ROLE_LABEL, SIGNAL_LABEL, STATUS_CLASS, STATUS_LABEL } from "@/lib/labels";
+import { FULL_CARD, schoolProfile, type Contractor, type Match } from "@/lib/schools";
 
 // Where each fact sits on the return, so a rep can check it.
 const LINES = {
@@ -153,11 +93,6 @@ function ManagementCompany({ m, managers, contractors }: { m: Match; managers: M
   );
 }
 
-// Cards first for the nonprofits a rep acts on, then everything else.
-const FULL_CARD: Role[] = ["operator", "management"];
-
-type StatusRow = { status: Status; reason: string | null; detail: Record<string, string | boolean> };
-
 // One line per agreeing signal, showing what was compared.
 function signalDetail(signal: string, e: Record<string, string | number | null> | undefined): string {
   if (!e) return "";
@@ -184,44 +119,14 @@ function signalDetail(signal: string, e: Record<string, string | number | null> 
 async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]">["params"] }) {
   await connection();
   const { ncessch } = await params;
-  const [school] = await sql<School[]>`SELECT * FROM schools WHERE ncessch = ${ncessch}`;
-  if (!school) notFound();
-
-  const [status] = await sql<StatusRow[]>`SELECT status, reason, detail FROM school_status WHERE ncessch = ${ncessch}`;
-  const matches = await sql<Match[]>`
-    SELECT m.ein, m.tier, m.role, m.source, m.signals, m.ambiguous, m.evidence, f.object_id, f.org_name, f.return_type,
-           f.tax_period_begin, f.tax_period_end, f.return_ts, f.amended,
-           f.total_revenue, f.total_expenses, f.total_assets, f.net_assets,
-           f.mgmt_delegated, f.mgmt_explanation, f.source_zip, b.state AS filer_state
-    FROM school_matches m
-    JOIN filings f ON f.object_id = m.object_id
-    LEFT JOIN bmf_orgs b ON b.ein = m.ein
-    WHERE m.ncessch = ${ncessch}
-    ORDER BY array_position(ARRAY['operator', 'management', 'support', 'affiliate', 'related', 'other'], m.role),
-             (m.tier = 'verified') DESC, cardinality(m.signals) DESC,
-             (b.state = ${school.st}) DESC NULLS LAST, f.total_revenue DESC NULLS LAST`;
+  const profile = await schoolProfile(ncessch);
+  if (!profile) notFound();
+  const { school, status, matches, people, contractors } = profile;
 
   const cards = matches.filter((m) => FULL_CARD.includes(m.role));
   const others = matches.filter((m) => !FULL_CARD.includes(m.role));
   const managers = matches.filter((m) => m.role === "management");
   const operators = matches.filter((m) => m.role === "operator").length;
-
-  const people = cards.length
-    ? await sql<Person[]>`
-        SELECT object_id, name, title, avg_hours, comp_org, comp_related, comp_other,
-               (coalesce(comp_org, 0) + coalesce(comp_related, 0) + coalesce(comp_other, 0))::text AS total
-        FROM filing_people
-        WHERE object_id IN ${sql(cards.map((m) => m.object_id))}
-        ORDER BY object_id, (coalesce(comp_org, 0) + coalesce(comp_related, 0) + coalesce(comp_other, 0)) DESC, seq`
-    : [];
-
-  const contractors = cards.length
-    ? await sql<Contractor[]>`
-        SELECT object_id, name, services, compensation, is_management
-        FROM filing_contractors
-        WHERE object_id IN ${sql(cards.map((m) => m.object_id))}
-        ORDER BY object_id, compensation DESC NULLS LAST, seq`
-    : [];
 
   return (
     <main>

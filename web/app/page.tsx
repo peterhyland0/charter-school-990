@@ -2,44 +2,28 @@ import Link from "next/link";
 import { connection } from "next/server";
 import { Suspense } from "react";
 import { sql } from "@/lib/db";
-import { STATUS_CLASS, STATUS_LABEL, type Status } from "@/lib/labels";
-
-type Row = {
-  ncessch: string;
-  sch_name: string;
-  lcity: string | null;
-  st: string;
-  is_operating: boolean;
-  status: Status | null;
-  nonprofits: string | null;
-  managers: string | null;
-  total: string;
-};
+import { STATUS_CLASS, STATUS_LABEL } from "@/lib/labels";
+import { describePlaces, listSchools, parseFilters, stateCodes } from "@/lib/schools";
 
 const LIMIT = 50;
-
-// Treat the user's % and _ as literal characters, not LIKE wildcards.
-function likePattern(q: string): string {
-  return `%${q.replace(/[\\%_]/g, "\\$&")}%`;
-}
 
 async function Summary() {
   // Request-time data: never query the database while building.
   await connection();
   const [row] = await sql<
-    { total: string; verified: string; likely: string; unmatched: string; corrected: string; states: string }[]
+    { total: string; verified: string; likely: string; unmatched: string; corrected: string }[]
   >`
     SELECT count(*) AS total,
            count(*) FILTER (WHERE status = 'verified') AS verified,
            count(*) FILTER (WHERE status = 'likely') AS likely,
            count(*) FILTER (WHERE status = 'unmatched') AS unmatched,
-           count(*) FILTER (WHERE corrected) AS corrected,
-           (SELECT count(DISTINCT st) FROM schools WHERE is_operating) AS states
+           count(*) FILTER (WHERE corrected) AS corrected
     FROM school_status`;
+  const places = describePlaces(await stateCodes());
   const n = (v: string) => Number(v).toLocaleString("en-US");
   return (
     <p className="mt-1 mb-4 text-sm opacity-70">
-      {n(row.total)} operating charter schools in {row.states} states · {n(row.verified)} verified ·{" "}
+      {n(row.total)} operating charter schools in {places} · {n(row.verified)} verified ·{" "}
       {n(row.likely)} likely · {n(row.unmatched)} unmatched
       {Number(row.corrected) > 0 && ` · ${n(row.corrected)} corrected by hand`}
     </p>
@@ -49,38 +33,16 @@ async function Summary() {
 async function Search({ searchParams }: { searchParams: PageProps<"/">["searchParams"] }) {
   await connection();
   const params = await searchParams;
-  const q = (typeof params.q === "string" ? params.q : "").trim();
-  const st = typeof params.st === "string" ? params.st.trim().toUpperCase() : "";
-  const states = await sql<{ st: string }[]>`SELECT DISTINCT st FROM schools WHERE is_operating ORDER BY st`;
-  const pattern = likePattern(q);
-
-  const rows: Row[] =
+  const filters = parseFilters(params);
+  const { q, st } = filters;
+  // The home search also finds schools by the nonprofit or management company
+  // behind them, and includes closed schools, marked as such.
+  const [states, { rows, total }] = await Promise.all([
+    stateCodes(),
     q || st
-      ? await sql<Row[]>`
-          SELECT s.ncessch, s.sch_name, s.lcity, s.st, s.is_operating, ss.status,
-                 -- The nonprofit(s) that run the school; several when it's ambiguous.
-                 (SELECT string_agg(DISTINCT f.org_name, ' or ')
-                    FROM school_matches m JOIN filings f ON f.object_id = m.object_id
-                   WHERE m.ncessch = s.ncessch AND m.role = 'operator') AS nonprofits,
-                 -- Its management company: a management contractor on the
-                 -- operator's return, or else the linked management nonprofit.
-                 coalesce(
-                   (SELECT string_agg(DISTINCT c.name, ' and ')
-                      FROM school_matches m JOIN filing_contractors c ON c.object_id = m.object_id
-                     WHERE m.ncessch = s.ncessch AND m.role = 'operator' AND c.is_management),
-                   (SELECT string_agg(DISTINCT f.org_name, ' and ')
-                      FROM school_matches m JOIN filings f ON f.object_id = m.object_id
-                     WHERE m.ncessch = s.ncessch AND m.role = 'management')
-                 ) AS managers,
-                 count(*) OVER () AS total
-          FROM schools s
-          LEFT JOIN school_status ss ON ss.ncessch = s.ncessch
-          WHERE (${q} = '' OR s.sch_name ILIKE ${pattern} OR s.lea_name ILIKE ${pattern} OR s.lcity ILIKE ${pattern})
-            AND (${st} = '' OR s.st = ${st})
-          ORDER BY s.is_operating DESC, s.sch_name
-          LIMIT ${LIMIT}`
-      : [];
-  const total = rows.length ? Number(rows[0].total) : 0;
+      ? listSchools({ ...filters, status: "", managed: "", rev: "" }, { limit: LIMIT, includeClosed: true })
+      : Promise.resolve({ rows: [], total: 0 }),
+  ]);
 
   return (
     <>
@@ -88,7 +50,7 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
         <input
           name="q"
           defaultValue={q}
-          placeholder="School, district or city"
+          placeholder="School, district, city, nonprofit or management company"
           className="min-w-0 flex-1 rounded border border-black/20 bg-transparent px-3 py-2 dark:border-white/25"
         />
         <select
@@ -99,8 +61,8 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
         >
           <option value="">All states</option>
           {states.map((s) => (
-            <option key={s.st} value={s.st}>
-              {s.st}
+            <option key={s} value={s}>
+              {s}
             </option>
           ))}
         </select>
@@ -129,7 +91,7 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
                 {r.lcity}, {r.st}
                 {!r.is_operating && " · not operating"}
                 {" · "}
-                {r.nonprofits ? `Run by ${r.nonprofits}` : "No nonprofit matched"}
+                {r.operators ? `Run by ${r.operators}` : r.is_operating ? "No nonprofit matched" : ""}
                 {r.managers && ` · Managed by ${r.managers}`}
               </div>
             </li>
@@ -148,7 +110,10 @@ export default function Home({ searchParams }: PageProps<"/">) {
         <Summary />
       </Suspense>
       <p className="mb-4 text-sm opacity-70">
-        Each school is linked to the nonprofit behind it, with leaders, pay and finances from its latest IRS Form 990.
+        Each school is linked to the nonprofit behind it, with leaders, pay and finances from its latest IRS Form 990.{" "}
+        <Link href="/schools" className="underline">
+          Build a list or download a spreadsheet →
+        </Link>
       </p>
       <Suspense fallback={<p className="text-sm opacity-70">Loading…</p>}>
         <Search searchParams={searchParams} />
