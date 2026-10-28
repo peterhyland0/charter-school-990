@@ -26,3 +26,9 @@ node_modules/
 .env.*
 !.env.example
 .DS_Store
+
+# Dagster local run history
+pipeline/.dagster_home/
+
+# Local agent tooling
+.claude/
