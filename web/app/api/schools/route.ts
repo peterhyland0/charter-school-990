@@ -1,15 +1,20 @@
 import type { NextRequest } from "next/server";
 import { toCsv } from "@/lib/csv";
 import { propublicaUrl } from "@/lib/format";
-import { filterQuery, listSchools, parseFilters, type ListRow } from "@/lib/schools";
+import { API_CACHE, filterQuery, listSchools, num, parseFilters, type ListRow } from "@/lib/schools";
 
 // The school list as JSON (paged) or, with ?format=csv, as a spreadsheet of
 // every matching school. Same filters as the /schools page.
 const PAGE_SIZE = 500;
 
-const num = (v: string | null) => (v === null ? null : Number(v));
+const COLUMNS = [
+  "ncessch", "school", "city", "state", "status", "unmatched_reason", "operator", "operator_ein",
+  "operator_ambiguous", "management_company", "delegates_management", "revenue", "expenses", "net_assets",
+  "top_paid_leader", "top_paid_leader_title", "top_paid_leader_pay", "year_ending", "return_form",
+  "school_page", "return_url",
+] as const;
 
-function record(r: ListRow, origin: string) {
+function record(r: ListRow, origin: string): Record<(typeof COLUMNS)[number], string | number | boolean | null> {
   return {
     ncessch: r.ncessch,
     school: r.sch_name,
@@ -42,15 +47,17 @@ export async function GET(request: NextRequest) {
 
   if (params.get("format") === "csv") {
     const { rows } = await listSchools(filters);
-    const records = rows.map((r) => record(r, origin));
-    const header = Object.keys(record({} as ListRow, origin));
-    const body = toCsv(header, records.map((x) => Object.values(x)));
+    const body = toCsv([...COLUMNS], rows.map((r) => {
+      const rec = record(r, origin);
+      return COLUMNS.map((c) => rec[c]);
+    }));
     const name = ["charter-schools", filters.st, filters.managed && `managed-${filters.managed}`, filters.status,
       filters.rev && `revenue-${filters.rev}`, new Date().toISOString().slice(0, 10)].filter(Boolean).join("-");
     return new Response(body, {
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="${name}.csv"`,
+        "Cache-Control": API_CACHE,
       },
     });
   }
@@ -63,5 +70,5 @@ export async function GET(request: NextRequest) {
     offset,
     schools: rows.map((r) => record(r, origin)),
     next: nextOffset < total ? `${origin}/api/schools?${filterQuery(filters, { offset: String(nextOffset) })}` : null,
-  });
+  }, { headers: { "Cache-Control": API_CACHE } });
 }

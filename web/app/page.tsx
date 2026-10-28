@@ -88,11 +88,14 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
                 )}
               </div>
               <div className="text-sm opacity-70">
-                {r.lcity}, {r.st}
-                {!r.is_operating && " · not operating"}
-                {" · "}
-                {r.operators ? `Run by ${r.operators}` : r.is_operating ? "No nonprofit matched" : ""}
-                {r.managers && ` · Managed by ${r.managers}`}
+                {[
+                  `${r.lcity}, ${r.st}`,
+                  !r.is_operating && "not operating",
+                  r.operators ? `Run by ${r.operators}` : r.is_operating && "No nonprofit matched",
+                  r.managers && `Managed by ${r.managers}`,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
               </div>
             </li>
           ))}

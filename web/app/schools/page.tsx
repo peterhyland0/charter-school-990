@@ -82,7 +82,9 @@ async function SchoolList({ searchParams }: { searchParams: PageProps<"/schools"
       </div>
 
       {rows.length === 0 ? (
-        <p className="mt-4 text-sm opacity-70">No schools match these filters.</p>
+        <p className="mt-4 text-sm opacity-70">
+          {total > 0 ? `This page is past the end of the list.` : "No schools match these filters."}
+        </p>
       ) : (
         <div className="mt-2 overflow-x-auto">
           <table className="w-full min-w-[860px] text-left text-sm">
@@ -117,7 +119,12 @@ async function SchoolList({ searchParams }: { searchParams: PageProps<"/schools"
                     {r.ambiguous && <div className="text-xs opacity-60">ambiguous</div>}
                   </td>
                   <td className="py-2 pr-3">
-                    {r.managers ?? (r.mgmt_delegated ? "Delegated (named in the return's explanation)" : <span className="opacity-50">—</span>)}
+                    {r.managers ??
+                      (r.mgmt_delegated ? (
+                        r.has_explanation ? "Delegated (see the return's explanation)" : "Delegated, manager not named"
+                      ) : (
+                        <span className="opacity-50">—</span>
+                      ))}
                   </td>
                   <td className="py-2 pr-3 text-right tabular-nums">{money(r.total_revenue)}</td>
                   <td className="py-2 pr-3">
@@ -140,9 +147,13 @@ async function SchoolList({ searchParams }: { searchParams: PageProps<"/schools"
         </div>
       )}
 
-      {pages > 1 && (
+      {(pages > 1 || page > pages) && (
         <nav className="mt-4 flex gap-4 text-sm">
-          {page > 1 && <Link href={pageLink(page - 1)} className="underline">← Previous</Link>}
+          {page > pages ? (
+            <Link href={pageLink(pages)} className="underline">← Back to page {pages}</Link>
+          ) : (
+            page > 1 && <Link href={pageLink(page - 1)} className="underline">← Previous</Link>
+          )}
           {page < pages && <Link href={pageLink(page + 1)} className="underline">Next →</Link>}
         </nav>
       )}

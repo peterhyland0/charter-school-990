@@ -1,4 +1,5 @@
 import "server-only";
+import { cache } from "react";
 import { sql } from "@/lib/db";
 import type { Role, Status } from "@/lib/labels";
 
@@ -40,9 +41,10 @@ export function parseFilters(params: Params): Filters {
   const status = param(params, "status");
   const managed = param(params, "managed");
   const rev = param(params, "rev");
+  const st = param(params, "st").toUpperCase();
   return {
     q: param(params, "q"),
-    st: param(params, "st").toUpperCase().slice(0, 2),
+    st: /^[A-Z]{2}$/.test(st) ? st : "",
     status: STATUSES.includes(status as Status) ? (status as Status) : "",
     managed: managed === "yes" || managed === "no" ? managed : "",
     rev: rev in REVENUE_BANDS ? (rev as RevenueBand) : "",
@@ -79,6 +81,7 @@ export type ListRow = {
   total_expenses: string | null;
   net_assets: string | null;
   mgmt_delegated: boolean | null;
+  has_explanation: boolean | null;
   tax_period_end: Date | null;
   managers: string | null;
   leader_name: string | null;
@@ -97,73 +100,95 @@ export async function listSchools(
   const pattern = likePattern(filters.q);
   const band = filters.rev ? REVENUE_BANDS[filters.rev] : null;
   const managed = sql`(f.mgmt_delegated IS TRUE OR mg.managers IS NOT NULL)`;
-  const rows = await sql<ListRow[]>`
-    SELECT s.ncessch, s.sch_name, s.lcity, s.st, s.is_operating, ss.status, ss.reason,
-           o.operators, o.operator_eins, o.ambiguous,
-           f.ein, f.object_id, f.return_type, f.total_revenue, f.total_expenses, f.net_assets,
-           f.mgmt_delegated, f.tax_period_end,
-           mg.managers, lp.name AS leader_name, lp.title AS leader_title, lp.total::text AS leader_pay,
-           count(*) OVER () AS total
-    FROM schools s
-    LEFT JOIN school_status ss ON ss.ncessch = s.ncessch
-    LEFT JOIN LATERAL (
-      SELECT string_agg(mf.org_name, ' or ' ORDER BY mf.total_revenue DESC NULLS LAST) AS operators,
-             string_agg(m.ein, ' or ' ORDER BY mf.total_revenue DESC NULLS LAST) AS operator_eins,
-             (array_agg(m.object_id ORDER BY mf.total_revenue DESC NULLS LAST))[1] AS object_id,
-             count(*) > 1 AS ambiguous
-      FROM school_matches m JOIN filings mf ON mf.object_id = m.object_id
-      WHERE m.ncessch = s.ncessch AND m.role = 'operator'
-    ) o ON true
-    LEFT JOIN filings f ON f.object_id = o.object_id
-    LEFT JOIN LATERAL (
-      -- The management company: a management contractor on the operator's
-      -- return, or else the linked management nonprofit.
-      SELECT coalesce(
-        (SELECT string_agg(DISTINCT c.name, ' and ') FROM filing_contractors c
-          WHERE c.object_id = o.object_id AND c.is_management),
-        (SELECT string_agg(DISTINCT xf.org_name, ' and ') FROM school_matches x
-           JOIN filings xf ON xf.object_id = x.object_id
-          WHERE x.ncessch = s.ncessch AND x.role = 'management')
-      ) AS managers
-    ) mg ON true
+  // Filter first, then page, then look up the top-paid leader for the page's
+  // rows only. The outer join keeps one row carrying the total even when the
+  // page is past the end, so the count is never reported as zero by mistake.
+  const result = await sql<(ListRow | (Partial<ListRow> & { ncessch: null; total: string }))[]>`
+    WITH matched AS (
+      SELECT s.ncessch, s.sch_name, s.lcity, s.st, s.is_operating, ss.status, ss.reason,
+             o.operators, o.operator_eins, o.ambiguous,
+             f.ein, f.object_id, f.return_type, f.total_revenue, f.total_expenses, f.net_assets,
+             f.mgmt_delegated, f.mgmt_explanation IS NOT NULL AS has_explanation, f.tax_period_end,
+             mg.managers
+      FROM schools s
+      LEFT JOIN school_status ss ON ss.ncessch = s.ncessch
+      LEFT JOIN LATERAL (
+        SELECT string_agg(mf.org_name, ' or ' ORDER BY mf.total_revenue DESC NULLS LAST) AS operators,
+               string_agg(m.ein, ' or ' ORDER BY mf.total_revenue DESC NULLS LAST) AS operator_eins,
+               (array_agg(m.object_id ORDER BY mf.total_revenue DESC NULLS LAST))[1] AS object_id,
+               count(*) > 1 AS ambiguous
+        FROM school_matches m JOIN filings mf ON mf.object_id = m.object_id
+        WHERE m.ncessch = s.ncessch AND m.role = 'operator'
+      ) o ON true
+      LEFT JOIN filings f ON f.object_id = o.object_id
+      LEFT JOIN LATERAL (
+        -- The management company: a management contractor on the operator's
+        -- return, or else the linked management nonprofit.
+        SELECT coalesce(
+          (SELECT string_agg(DISTINCT c.name, ' and ') FROM filing_contractors c
+            WHERE c.object_id = o.object_id AND c.is_management),
+          (SELECT string_agg(DISTINCT xf.org_name, ' and ') FROM school_matches x
+             JOIN filings xf ON xf.object_id = x.object_id
+            WHERE x.ncessch = s.ncessch AND x.role = 'management')
+        ) AS managers
+      ) mg ON true
+      WHERE ${includeClosed ? sql`true` : sql`s.is_operating`}
+        ${filters.st ? sql`AND s.st = ${filters.st}` : sql``}
+        ${filters.status ? sql`AND ss.status = ${filters.status}` : sql``}
+        ${filters.managed === "yes" ? sql`AND ${managed}` : sql``}
+        ${filters.managed === "no" ? sql`AND o.object_id IS NOT NULL AND NOT ${managed}` : sql``}
+        ${band ? sql`AND f.total_revenue >= ${band.min}` : sql``}
+        ${band?.max ? sql`AND f.total_revenue < ${band.max}` : sql``}
+        ${filters.q ? sql`AND (
+          s.sch_name ILIKE ${pattern} OR s.lea_name ILIKE ${pattern} OR s.lcity ILIKE ${pattern}
+          -- The nonprofit or management company behind the school, so
+          -- "Academica" or "KIPP Texas" finds the schools they run.
+          OR EXISTS (SELECT 1 FROM school_matches m JOIN filings nf ON nf.object_id = m.object_id
+                     WHERE m.ncessch = s.ncessch AND m.role IN ('operator', 'management')
+                       AND (nf.org_name ILIKE ${pattern} OR nf.dba_name ILIKE ${pattern}))
+          OR EXISTS (SELECT 1 FROM school_matches m JOIN filing_contractors c ON c.object_id = m.object_id
+                     WHERE m.ncessch = s.ncessch AND m.role = 'operator' AND c.is_management
+                       AND c.name ILIKE ${pattern}))` : sql``}
+    ),
+    page AS (
+      SELECT * FROM matched
+      ORDER BY is_operating DESC, st, sch_name, ncessch
+      ${limit ? sql`LIMIT ${limit} OFFSET ${offset}` : sql``}
+    )
+    SELECT p.*, lp.name AS leader_name, lp.title AS leader_title, lp.total::text AS leader_pay,
+           (SELECT count(*) FROM matched) AS total
+    FROM (SELECT 1) AS one
+    LEFT JOIN page p ON true
     LEFT JOIN LATERAL (
       -- The highest-paid person on the return. Volunteers (all pay zero) don't
       -- count: where a management company employs the staff, the return lists
       -- only an unpaid board, and "top-paid leader: $0" would mislead.
       SELECT x.name, x.title, x.total FROM (
-        SELECT p.name, p.title, p.seq,
-               coalesce(p.comp_org, 0) + coalesce(p.comp_related, 0) + coalesce(p.comp_other, 0) AS total
-        FROM filing_people p WHERE p.object_id = o.object_id
+        SELECT fp.name, fp.title, fp.seq,
+               coalesce(fp.comp_org, 0) + coalesce(fp.comp_related, 0) + coalesce(fp.comp_other, 0) AS total
+        FROM filing_people fp WHERE fp.object_id = p.object_id
       ) x
       WHERE x.total > 0
       ORDER BY x.total DESC, x.seq LIMIT 1
     ) lp ON true
-    WHERE ${includeClosed ? sql`true` : sql`s.is_operating`}
-      ${filters.st ? sql`AND s.st = ${filters.st}` : sql``}
-      ${filters.status ? sql`AND ss.status = ${filters.status}` : sql``}
-      ${filters.managed === "yes" ? sql`AND ${managed}` : sql``}
-      ${filters.managed === "no" ? sql`AND o.object_id IS NOT NULL AND NOT ${managed}` : sql``}
-      ${band ? sql`AND f.total_revenue >= ${band.min}` : sql``}
-      ${band?.max ? sql`AND f.total_revenue < ${band.max}` : sql``}
-      ${filters.q ? sql`AND (
-        s.sch_name ILIKE ${pattern} OR s.lea_name ILIKE ${pattern} OR s.lcity ILIKE ${pattern}
-        -- The nonprofit or management company behind the school, so "Academica"
-        -- or "KIPP Texas" finds the schools they run.
-        OR EXISTS (SELECT 1 FROM school_matches m JOIN filings nf ON nf.object_id = m.object_id
-                   WHERE m.ncessch = s.ncessch AND m.role IN ('operator', 'management')
-                     AND (nf.org_name ILIKE ${pattern} OR nf.dba_name ILIKE ${pattern}))
-        OR EXISTS (SELECT 1 FROM school_matches m JOIN filing_contractors c ON c.object_id = m.object_id
-                   WHERE m.ncessch = s.ncessch AND m.role = 'operator' AND c.is_management
-                     AND c.name ILIKE ${pattern}))` : sql``}
-    ORDER BY s.is_operating DESC, s.st, s.sch_name, s.ncessch
-    ${limit ? sql`LIMIT ${limit} OFFSET ${offset}` : sql``}`;
-  return { rows, total: rows.length ? Number(rows[0].total) : 0 };
+    ORDER BY p.is_operating DESC, p.st, p.sch_name, p.ncessch`;
+  const total = result.length ? Number(result[0].total) : 0;
+  return { rows: result.filter((r): r is ListRow => r.ncessch !== null), total };
 }
 
-export async function stateCodes(): Promise<string[]> {
+// The same list of codes is needed by several components of one page: query once per request.
+export const stateCodes = cache(async (): Promise<string[]> => {
   const rows = await sql<{ st: string }[]>`SELECT DISTINCT st FROM schools WHERE is_operating ORDER BY st`;
   return rows.map((r) => r.st);
-}
+});
+
+// The data changes when the monthly pipeline runs, so the API lets Vercel's CDN
+// serve repeat requests for an hour (and a stale copy for a day while it
+// refreshes) instead of rerunning the national query for each one.
+export const API_CACHE = "public, s-maxage=3600, stale-while-revalidate=86400";
+
+// postgres.js returns bigint and numeric columns as strings; JSON and CSV want numbers.
+export const num = (v: string | null | undefined): number | null => (v === null || v === undefined ? null : Number(v));
 
 // --- One school ---------------------------------------------------------------
 

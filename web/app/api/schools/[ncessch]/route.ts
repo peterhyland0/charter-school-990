@@ -1,9 +1,8 @@
 import type { NextRequest } from "next/server";
 import { propublicaUrl } from "@/lib/format";
-import { schoolProfile } from "@/lib/schools";
+import { API_CACHE, num, schoolProfile } from "@/lib/schools";
 
 // Everything the school page shows, as JSON. Unknown schools get a real 404.
-const num = (v: string | null) => (v === null ? null : Number(v));
 
 export async function GET(request: NextRequest, ctx: RouteContext<"/api/schools/[ncessch]">) {
   const { ncessch } = await ctx.params;
@@ -49,5 +48,5 @@ export async function GET(request: NextRequest, ctx: RouteContext<"/api/schools/
         name: c.name, services: c.services, compensation: num(c.compensation), management_company: c.is_management,
       })),
     })),
-  });
+  }, { headers: { "Cache-Control": API_CACHE } });
 }
