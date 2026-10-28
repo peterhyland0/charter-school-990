@@ -68,11 +68,26 @@ type Contractor = {
 
 // Where each fact sits on the return, so a rep can check it.
 const LINES = {
-  "990": { revenue: "Part I, line 12", expenses: "Part I, line 18", assets: "Part X, line 16", net: "Part X, line 33" },
-  "990EZ": { revenue: "line 9", expenses: "line 17", assets: "line 25", net: "line 27" },
+  "990": { revenue: "Part I, line 12", expenses: "Part I, line 18", assets: "Part I, line 20", net: "Part I, line 22" },
+  "990EZ": { revenue: "Part I, line 9", expenses: "Part I, line 17", assets: "Part II, line 25", net: "Part II, line 27" },
 } as const;
 
 const EXPLANATION_PREVIEW = 280;
+
+// When the following return is due, in the right tense for today. The IRS
+// index holds returns a few months after they're filed, so a past due date
+// means the return isn't in the data yet.
+function nextReturnText(next: NonNullable<ReturnType<typeof nextReturn>>): string {
+  const now = new Date();
+  const year = `The next return (year ending ${month(next.yearEnd)})`;
+  if (now < next.due) {
+    return `${year} is due ${day(next.due)}, or ${day(next.extended)} with the usual extension, and appears in IRS data a few months later.`;
+  }
+  if (now < next.extended) {
+    return `${year} was due ${day(next.due)}; with the usual extension it is due ${day(next.extended)}. It isn't in IRS data yet.`;
+  }
+  return `${year} was due by ${day(next.extended)} at the latest, but isn't in IRS data yet.`;
+}
 
 // The management answer from three sources on the return, plus the matcher's
 // linked management organization. Sources are shown side by side, not merged.
@@ -80,15 +95,17 @@ function ManagementCompany({ m, managers, contractors }: { m: Match; managers: M
   if (m.return_type === "990EZ") {
     return <p className="text-sm">Not asked on Form 990-EZ.</p>;
   }
-  const hired = contractors.filter((c) => c.is_management);
-  const named = [...hired.map((c) => c.name), ...managers.map((x) => x.org_name)].filter(Boolean);
-  const unique = [...new Set(named)];
+  const managing = contractors.filter((c) => c.is_management);
+  const named = [...new Set([...managing.map((c) => c.name), ...managers.map((x) => x.org_name)].filter(Boolean))];
   const says = m.mgmt_delegated === null ? "Not answered" : m.mgmt_delegated ? "Yes" : "No";
-  const headline =
-    m.mgmt_delegated || hired.length
-      ? unique.length
-        ? `Yes: ${unique.join(" and ")}`
-        : "Yes, management duties are delegated"
+  // Only Part VI line 3 says "yes" outright; a management contractor without it
+  // is evidence, and the headline says so.
+  const headline = m.mgmt_delegated
+    ? named.length
+      ? `Yes: ${named.join(" and ")}`
+      : "Yes, management duties are delegated"
+    : managing.length
+      ? `The contractor list suggests yes: ${named.join(" and ")}`
       : says;
   const text = m.mgmt_explanation;
   return (
@@ -98,7 +115,7 @@ function ManagementCompany({ m, managers, contractors }: { m: Match; managers: M
         <li>
           <span className="opacity-70">Part VI, line 3 (delegates management?):</span> {says}
         </li>
-        {hired.map((c, i) => (
+        {managing.map((c, i) => (
           <li key={i}>
             <span className="opacity-70">Contractor list (Part VII, Section B):</span> {c.name}, {c.services?.toLowerCase()},{" "}
             {money(c.compensation)}
@@ -125,9 +142,11 @@ function ManagementCompany({ m, managers, contractors }: { m: Match; managers: M
           </li>
         ))}
       </ul>
-      {m.mgmt_delegated === false && hired.length > 0 && (
+      {m.mgmt_delegated !== true && managing.length > 0 && (
         <p className="mt-1 rounded bg-amber-500/10 p-2">
-          The sources disagree: the return says management isn&apos;t delegated, but lists a management contractor.
+          {m.mgmt_delegated === false
+            ? "The sources disagree: the return says management isn't delegated, but lists a management contractor."
+            : "The return leaves the delegation question unanswered, but lists a management contractor."}
         </p>
       )}
     </div>
@@ -250,7 +269,7 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
 
       {cards.map((m) => {
         const rows = people.filter((p) => p.object_id === m.object_id);
-        const hired = contractors.filter((c) => c.object_id === m.object_id);
+        const filedContractors = contractors.filter((c) => c.object_id === m.object_id);
         const lines = m.return_type === "990EZ" ? LINES["990EZ"] : LINES["990"];
         const next = nextReturn(m.tax_period_end);
         const correction = m.evidence.correction;
@@ -290,13 +309,7 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
 
             <p className="mt-4 text-sm">
               <span className="opacity-70">Covers</span> {day(m.tax_period_begin)} – {day(m.tax_period_end)}
-              {next && (
-                <span className="opacity-70">
-                  {" "}
-                  · The next return (year ending {month(next.yearEnd)}) is due {day(next.due)}, or {day(next.extended)} with the
-                  usual extension, and appears in IRS data a few months later.
-                </span>
-              )}
+              {next && <span className="opacity-70"> · {nextReturnText(next)}</span>}
             </p>
 
             <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
@@ -319,7 +332,7 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
             {m.role === "operator" && (
               <section className="mt-4">
                 <h3 className="font-medium">Management company</h3>
-                <ManagementCompany m={m} managers={managers} contractors={hired} />
+                <ManagementCompany m={m} managers={managers} contractors={filedContractors} />
               </section>
             )}
 
@@ -357,13 +370,13 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
               </div>
             )}
 
-            {hired.length > 0 && (
+            {filedContractors.length > 0 && (
               <details className="mt-4 text-sm">
                 <summary className="cursor-pointer font-medium">
-                  Largest contractors ({hired.length}) <span className="text-xs font-normal opacity-50">Part VII, Section B</span>
+                  Largest contractors ({filedContractors.length}) <span className="text-xs font-normal opacity-50">Part VII, Section B</span>
                 </summary>
                 <ul className="mt-1 space-y-0.5">
-                  {hired.map((c, i) => (
+                  {filedContractors.map((c, i) => (
                     <li key={i}>
                       {c.name} · {c.services?.toLowerCase()} · {money(c.compensation)}
                       {c.is_management && <span className="opacity-60"> · management</span>}

@@ -8,14 +8,18 @@ export function money(value: string | number | null | undefined): string {
   }).format(Number(value));
 }
 
-export function day(value: Date | string | null | undefined): string {
+// Dates are shown in UTC: return dates are calendar dates without a time zone.
+function formatDate(value: Date | string | null | undefined, options: Intl.DateTimeFormatOptions): string {
   if (!value) return "—";
-  return new Date(value).toLocaleDateString("en-US", {
-    timeZone: "UTC",
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
+  return new Date(value).toLocaleDateString("en-US", { timeZone: "UTC", ...options });
+}
+
+export function day(value: Date | string | null | undefined): string {
+  return formatDate(value, { year: "numeric", month: "short", day: "numeric" });
+}
+
+export function month(value: Date | string | null | undefined): string {
+  return formatDate(value, { year: "numeric", month: "short" });
 }
 
 export function propublicaUrl(ein: string, objectId: string): string {
@@ -35,13 +39,11 @@ export function nextReturn(periodEnd: Date | string | null | undefined):
   | null {
   if (!periodEnd) return null;
   const end = new Date(periodEnd);
-  const yearEnd = new Date(Date.UTC(end.getUTCFullYear() + 1, end.getUTCMonth(), end.getUTCDate()));
-  const due = new Date(Date.UTC(yearEnd.getUTCFullYear(), yearEnd.getUTCMonth() + 5, 15));
-  const extended = new Date(Date.UTC(due.getUTCFullYear(), due.getUTCMonth() + 6, 15));
+  const year = end.getUTCFullYear() + 1;
+  // Same day a year later, clamped to the month's length (Feb 29 -> Feb 28).
+  const lastDay = new Date(Date.UTC(year, end.getUTCMonth() + 1, 0)).getUTCDate();
+  const yearEnd = new Date(Date.UTC(year, end.getUTCMonth(), Math.min(end.getUTCDate(), lastDay)));
+  const due = new Date(Date.UTC(year, end.getUTCMonth() + 5, 15));
+  const extended = new Date(Date.UTC(year, end.getUTCMonth() + 11, 15));
   return { yearEnd, due, extended };
-}
-
-export function month(value: Date | string | null | undefined): string {
-  if (!value) return "—";
-  return new Date(value).toLocaleDateString("en-US", { timeZone: "UTC", year: "numeric", month: "short" });
 }

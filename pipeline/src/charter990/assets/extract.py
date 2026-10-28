@@ -20,7 +20,7 @@ from ..util import (
 )
 from .returns import SELECT_LATEST, raw_returns, xml_path
 
-PARSER_VERSION = "0.5"
+PARSER_VERSION = "0.6"
 STAGE = "parse"
 # Returns are untrusted input: no entity expansion, no network access.
 PARSER = etree.XMLParser(resolve_entities=False, no_network=True)

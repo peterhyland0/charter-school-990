@@ -267,7 +267,9 @@ def network_key(name: str | None, first_counts, two_counts, limit: int) -> str |
 # is mostly curriculum and special-education vendors (5 of 20 flagged in a spot
 # check), so it counts only when the Schedule O explanation names the vendor.
 _MGMT_SERVICE = re.compile(
-    r"\b(MANAGEMENT|MGMT|MANAGER|OPERATOR|EMO|CMO)\b"
+    # MANAGE?ME?NT? also covers the misspellings and truncations filers type:
+    # MANAGMENT, MANAGEMNT, "EDUCATION MANAGMEN".
+    r"\b(MANAGE?ME?NT?|MGMT|MANAGER|OPERATOR|EMO|CMO)\b"
     r"|\bEDUCATION(AL)? (SERVICE PROVIDER|SUPPORT)\b"
 )
 _NOT_MGMT_SERVICE = re.compile(

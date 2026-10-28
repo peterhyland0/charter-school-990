@@ -1,4 +1,5 @@
 # Local development. Assumes Postgres is running on localhost.
+SHELL := /bin/bash
 DB ?= charter990
 export DATABASE_URL ?= postgresql://localhost/$(DB)
 export DAGSTER_HOME := $(CURDIR)/pipeline/.dagster_home
@@ -20,6 +21,7 @@ db:  ## Apply each migration once, in order, to $$DATABASE_URL (creates the loca
 	    psql -q -v ON_ERROR_STOP=1 -1 "$(DATABASE_URL)" -f $$f -c "INSERT INTO schema_migrations (name) VALUES ('$$n')" || exit 1; \
 	  fi; \
 	done
+	@psql -q -v ON_ERROR_STOP=1 -1 "$(DATABASE_URL)" -f db/views.sql
 
 pipeline:  ## Run every asset once, end to end
 	@mkdir -p $(DAGSTER_HOME) && touch $(DAGSTER_HOME)/dagster.yaml
@@ -60,8 +62,16 @@ neon-load:  ## First load: copy the local database into an empty Neon database
 
 # Parsed returns change when the parser does. Copy them into Neon in one
 # transaction: the live site keeps reading the old rows until it commits.
+# Refuses when Neon holds returns this machine doesn't (the scheduled run found
+# newer ones), since the copy would roll them back; FORCE=1 overrides.
 SYNC_TABLES = filings filing_people filing_contractors
 neon-sync-filings:  ## Apply migrations to Neon, then copy the parsed returns from local in one transaction
+	@$(NEON_ENV) && \
+	  newer=$$(comm -13 <(psql -qAt "$(DATABASE_URL)" -c "SELECT object_id FROM filings ORDER BY 1") \
+	                    <(psql -qAt "$$NEON_DATABASE_URL" -c "SELECT object_id FROM filings ORDER BY 1") | wc -l | tr -d ' ') && \
+	  if [ "$$newer" != "0" ] && [ -z "$$FORCE" ]; then \
+	    echo "Neon has $$newer returns this machine doesn't; run make pipeline here first, or FORCE=1." >&2; exit 1; \
+	  fi
 	@$(NEON_ENV) && DATABASE_URL="$$NEON_DATABASE_URL" $(MAKE) -s db
 	@$(NEON_ENV) && ( \
 	  echo "DELETE FROM filing_contractors; DELETE FROM filing_people; DELETE FROM filings;"; \
