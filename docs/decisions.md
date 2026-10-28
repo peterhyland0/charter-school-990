@@ -61,6 +61,23 @@ A 990 never says which charter schools its filer holds, so a school stays unmatc
 - **Two adjudicators decide the schools the matcher leaves open** (ambiguous and unmatched), from the same evidence: a hand-weighted scored model, and Jev, TypeSafe's decision model, asked whether any candidate runs the school and which one. Jev answers with probabilities; the stored reason is written from the evidence, never by the model. Answers are cached by input, so a monthly run asks only about changed schools; the first full run cost $0.26.
 - **Only picks the two agree on are applied** (`ADJUDICATOR=both`, the default): 115 schools, 85 ambiguous ones resolved and 30 unmatched ones linked as likely, with source "consensus". Hand corrections still win, and an empty `ADJUDICATOR` returns to shadow mode, where decisions are stored but not applied. On the eval set the matcher with consensus applied scores 22 of 25 with no wrong answers; Jev alone scores 23 and the scored model 22.
 
+## The remaining gap
+
+Of the 2,019 unmatched schools, 828 are expected to have no nonprofit: district-run by state records (423), Michigan's public bodies (330), district-governed states (67) and government auditees (8). The other 1,191 are the real gap:
+
+- **No candidate found** (709) and **inside a regular district** (321, plus 66 that list the district's website). They concentrate in Texas (144), California (142), Arizona (93), Colorado (85), New Mexico (83) and Indiana (53). Most Colorado and all Indiana schools in the gap have no website in the NCES directory, so the website signal and the crawl can't help.
+- **A nonprofit with no e-filed 990** (95): a 990-N postcard filer, one not required to file, or no recent return.
+- **Adjudicators that disagree** (43): one model picks a nonprofit, but the two don't agree, so nothing is applied.
+
+**Proposed fixes, by likely gain:**
+
+1. **More state holder records,** the method that worked for Texas, Louisiana and Florida: Colorado's and Indiana's charter lists (their gaps have no websites), the Texas Education Agency's list of district partnership campuses (SB 1882), the Ohio community school directory, and Arizona's charter board data, which may also show holders that are for-profit and file no 990 (its site blocks scripted access, so this needs checking). New Mexico and Arkansas first need their legal status checked, as Hawaii's was: their charters may be district or state bodies.
+2. **Florida's trade-name registry (Sunbiz).** The loader is built and tested; the state serves the file only over SFTP, so it needs a manual download each quarter.
+3. **A wider website crawl.** In the pilot, 19% of sites blocked crawlers in robots.txt and 15% redirected to another domain, often a network's own site; following those redirects would reach more holders.
+4. **Search every e-filed 990, not only the candidate pool,** for the school's name in the program descriptions (Part III) and Schedule O. That finds holders whose names share nothing with the school's, at the cost of reading the whole IRS archive.
+5. **A review queue for disagreements and a bigger eval set.** The 43 split decisions, and a few hundred hand-labelled schools instead of 25, would show whether Jev alone can be trusted and let the thresholds be set on evidence.
+6. **Honest reasons for holders with no 990:** for-profit charter holders (common in Arizona) and nonprofits that file only on paper. Paper returns are published as PDFs, which could fill in finances.
+
 ## Management companies and finances
 
 - **"Does a management company decide?" is answered from four places on the returns, shown side by side:**
@@ -101,6 +118,5 @@ A 990 never says which charter schools its filer holds, so a school stays unmatc
 
 - **Returns lag:** most cover a year ending June 2025.
 - **Low matching in New Mexico (19%) is unexplained.** California (68%) is mostly its locally funded charters, labelled as district-run.
-- **Missed holders:** ones whose name, address and website all differ from the school's and that no outside source names. Florida's trade-name registry (Sunbiz) would add more, but the state serves it only over SFTP, so it needs a manual download.
 - **Ambiguous schools** (KIPP NYC, Great Hearts) need a correction or more evidence. Schedule R is shown on each school but doesn't yet decide between tied operators.
 - **Accuracy is measured by spot checks and a 25-school researched eval set,** too small to rank close methods.
