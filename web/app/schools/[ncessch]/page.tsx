@@ -4,7 +4,7 @@ import { connection } from "next/server";
 import { Suspense } from "react";
 import { day, formatEin, money, month, nextReturn, propublicaUrl } from "@/lib/format";
 import { reasonText, ROLE_LABEL, SIGNAL_LABEL, STATUS_CLASS, STATUS_LABEL } from "@/lib/labels";
-import { FULL_CARD, schoolProfile, type Contractor, type Match } from "@/lib/schools";
+import { FULL_CARD, schoolProfile, type Contractor, type Match, type Related } from "@/lib/schools";
 
 // Where each fact sits on the return, so a rep can check it.
 const LINES = {
@@ -13,6 +13,22 @@ const LINES = {
 } as const;
 
 const EXPLANATION_PREVIEW = 280;
+// Network members shown before "and N more".
+const NETWORK_PREVIEW = 8;
+
+// What Schedule R says about one related organization, and which return says it.
+function relatedDetail(r: Related): string {
+  const e = r.evidence;
+  const parts = [];
+  if (e.services) {
+    parts.push(r.services_amt ? `provided ${money(r.services_amt)} of services (Part V)` : "provided services (Part V)");
+  }
+  if (e.activity) parts.push(`described as "${e.activity.toLowerCase()}"`);
+  if (e.shared_staff) parts.push("shares paid staff");
+  if (r.related_schools > 0) parts.push(`runs ${r.related_schools} school${r.related_schools === 1 ? "" : "s"} here`);
+  if (e.listed_on) parts.push(`listed on ${e.listed_on}`);
+  return parts.join(", ");
+}
 
 // When the following return is due, in the right tense for today. The IRS
 // index holds returns a few months after they're filed, so a past due date
@@ -29,24 +45,35 @@ function nextReturnText(next: NonNullable<ReturnType<typeof nextReturn>>): strin
   return `${year} was due by ${day(next.extended)} at the latest, but isn't in IRS data yet.`;
 }
 
-// The management answer from three sources on the return, plus the matcher's
+// The management answer from four sources on the returns, plus the matcher's
 // linked management organization. Sources are shown side by side, not merged.
-function ManagementCompany({ m, managers, contractors }: { m: Match; managers: Match[]; contractors: Contractor[] }) {
+function ManagementCompany({ m, managers, contractors, related }: {
+  m: Match; managers: Match[]; contractors: Contractor[]; related: Related[];
+}) {
   if (m.return_type === "990EZ") {
     return <p className="text-sm">Not asked on Form 990-EZ.</p>;
   }
   const managing = contractors.filter((c) => c.is_management);
-  const named = [...new Set([...managing.map((c) => c.name), ...managers.map((x) => x.org_name)].filter(Boolean))];
+  const scheduleR = related.filter((r) => r.kind === "management");
+  const named = [...new Set([
+    ...managing.map((c) => c.name), ...managers.map((x) => x.org_name), ...scheduleR.map((r) => r.related_name),
+  ].filter(Boolean))];
   const says = m.mgmt_delegated === null ? "Not answered" : m.mgmt_delegated ? "Yes" : "No";
-  // Only Part VI line 3 says "yes" outright; a management contractor without it
-  // is evidence, and the headline says so.
+  // Only Part VI line 3 says "yes" outright; a management contractor or a
+  // related management organization without it is evidence, and the headline
+  // says so.
   const headline = m.mgmt_delegated
     ? named.length
       ? `Yes: ${named.join(" and ")}`
       : "Yes, management duties are delegated"
     : managing.length
       ? `The contractor list suggests yes: ${named.join(" and ")}`
-      : says;
+      : scheduleR.length
+        ? `Schedule R suggests yes: ${named.join(" and ")}`
+        : says;
+  const other = managing.length
+    ? "lists a management contractor"
+    : "Schedule R shows a related organization that manages it or provides its services";
   const text = m.mgmt_explanation;
   return (
     <div className="text-sm">
@@ -76,17 +103,23 @@ function ManagementCompany({ m, managers, contractors }: { m: Match; managers: M
             )}
           </li>
         )}
+        {scheduleR.map((r) => (
+          <li key={r.related_ein}>
+            <span className="opacity-70">Related organization (Schedule R):</span> {r.related_name}, EIN{" "}
+            {formatEin(r.related_ein)}: {relatedDetail(r)}
+          </li>
+        ))}
         {managers.map((x) => (
           <li key={x.ein}>
             <span className="opacity-70">Linked nonprofit:</span> {x.org_name}, the management organization this school is matched to
           </li>
         ))}
       </ul>
-      {m.mgmt_delegated !== true && managing.length > 0 && (
+      {m.mgmt_delegated !== true && (managing.length > 0 || scheduleR.length > 0) && (
         <p className="mt-1 rounded bg-amber-500/10 p-2">
           {m.mgmt_delegated === false
-            ? "The sources disagree: the return says management isn't delegated, but lists a management contractor."
-            : "The return leaves the delegation question unanswered, but lists a management contractor."}
+            ? `The sources disagree: the return says management isn't delegated, but ${other}.`
+            : `The return leaves the delegation question unanswered, but ${other}.`}
         </p>
       )}
     </div>
@@ -121,12 +154,13 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
   const { ncessch } = await params;
   const profile = await schoolProfile(ncessch);
   if (!profile) notFound();
-  const { school, status, matches, people, contractors } = profile;
+  const { school, status, matches, people, contractors, related } = profile;
 
   const cards = matches.filter((m) => FULL_CARD.includes(m.role));
   const others = matches.filter((m) => !FULL_CARD.includes(m.role));
   const managers = matches.filter((m) => m.role === "management");
   const operators = matches.filter((m) => m.role === "operator").length;
+  const network = related.filter((r) => r.kind === "network");
 
   return (
     <main>
@@ -175,6 +209,7 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
       {cards.map((m) => {
         const rows = people.filter((p) => p.object_id === m.object_id);
         const filedContractors = contractors.filter((c) => c.object_id === m.object_id);
+        const members = network.filter((r) => r.ein === m.ein);
         const lines = m.return_type === "990EZ" ? LINES["990EZ"] : LINES["990"];
         const next = nextReturn(m.tax_period_end);
         const correction = m.evidence.correction;
@@ -237,7 +272,29 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
             {m.role === "operator" && (
               <section className="mt-4">
                 <h3 className="font-medium">Management company</h3>
-                <ManagementCompany m={m} managers={managers} contractors={filedContractors} />
+                <ManagementCompany
+                  m={m}
+                  managers={managers}
+                  contractors={filedContractors}
+                  related={related.filter((r) => r.ein === m.ein)}
+                />
+              </section>
+            )}
+
+            {m.role === "operator" && members.length > 0 && (
+              <section className="mt-4 text-sm">
+                <h3 className="font-medium">
+                  Network <span className="text-xs font-normal opacity-50">Schedule R</span>
+                </h3>
+                <p className="opacity-70">Related nonprofits that run or support charter schools, as the returns list them.</p>
+                <ul className="mt-1 space-y-0.5">
+                  {members.slice(0, NETWORK_PREVIEW).map((r) => (
+                    <li key={r.related_ein}>
+                      {r.related_name} <span className="opacity-60">· {formatEin(r.related_ein)} · {relatedDetail(r)}</span>
+                    </li>
+                  ))}
+                </ul>
+                {members.length > NETWORK_PREVIEW && <p className="opacity-60">and {members.length - NETWORK_PREVIEW} more</p>}
               </section>
             )}
 

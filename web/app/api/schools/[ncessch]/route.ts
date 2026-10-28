@@ -8,7 +8,7 @@ export async function GET(request: NextRequest, ctx: RouteContext<"/api/schools/
   const { ncessch } = await ctx.params;
   const profile = await schoolProfile(ncessch);
   if (!profile) return Response.json({ error: `No school with NCES id ${ncessch}` }, { status: 404 });
-  const { school, status, matches, people, contractors } = profile;
+  const { school, status, matches, people, contractors, related } = profile;
   return Response.json({
     school,
     page: `${request.nextUrl.origin}/schools/${school.ncessch}`,
@@ -46,6 +46,13 @@ export async function GET(request: NextRequest, ctx: RouteContext<"/api/schools/
       })),
       contractors: contractors.filter((c) => c.object_id === m.object_id).map((c) => ({
         name: c.name, services: c.services, compensation: num(c.compensation), management_company: c.is_management,
+      })),
+      // Schedule R: management organizations and network members.
+      related_organizations: related.filter((r) => r.ein === m.ein).map((r) => ({
+        ein: r.related_ein, name: r.related_name, kind: r.kind, schools_run: r.related_schools,
+        activity: r.evidence.activity ?? null, provides_services: r.evidence.services ?? false,
+        services_amount: num(r.services_amt), shares_staff: r.evidence.shared_staff ?? false,
+        listed_on: r.evidence.listed_on ?? null,
       })),
     })),
   }, { headers: { "Cache-Control": API_CACHE } });

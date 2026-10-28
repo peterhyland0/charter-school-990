@@ -54,12 +54,18 @@ A 990 never says which charter schools its filer holds, so a school stays unmatc
 
 ## Management companies and finances
 
-- **"Does a management company decide?" is answered from three places on the return, shown side by side:**
+- **"Does a management company decide?" is answered from four places on the returns, shown side by side:**
   - the Part VI line 3 yes/no answer;
   - any contractor in Part VII-B whose service is running schools;
-  - the Schedule O text explaining line 3.
+  - the Schedule O text explaining line 3;
+  - a related organization on Schedule R that manages the school or provides its services (below).
 
   Of returns that say yes, 96% name the manager in at least one place. Mater Academy's names Academica Dade LLC, an "educational service provider" paid $10.5M. A contractor counts by its service description; property, food, construction and investment management don't.
+- **Schedule R links a school's nonprofit to its network and management organization.** 4,631 returns list related organizations by EIN, with each one's activity and the money between them. A related organization is:
+  - **its management organization** when it provides services (Part V) or the return calls it a management company, and it is described as school-related or the return says management is delegated. That gives 128 links covering 323 schools; for 263 of them no other source named a manager. Examples: Summit Academy Management, Imagine Schools, Lifelong Learning Administration.
+  - **in its network** when it runs or is described as a school, or shares paid staff: 2,158 links covering 1,033 schools.
+
+  Authorizing districts, universities, foundations, facilities and lending companies, and unrelated businesses (a hospital, a fund) are left out. The "controlled entity" box isn't used, because in 426 pairs of school nonprofits each claims to control the other. For-profit managers such as Academica never appear, because they aren't related by control.
 - **Finances carry their line numbers, and each school says when the next return is due,** so June 2025 figures aren't presented as current.
 - **No public "suggest a match" button yet.** The site reads through a role that can't write. A suggestion box needs its own insert-only table, spam protection and a review step, so corrections stay with `make correct` for now.
 
@@ -74,7 +80,7 @@ A 990 never says which charter schools its filer holds, so a school stays unmatc
 
 ## Stack
 
-- **Python and Dagster, Postgres, and Next.js with TypeScript,** as in the job description, hosted on Neon and Vercel. Dagster provides reruns, 12 loud checks and a monthly schedule. A rerun fetches only returns it hasn't seen.
+- **Python and Dagster, Postgres, and Next.js with TypeScript,** as in the job description, hosted on Neon and Vercel. Dagster provides reruns, 13 loud checks and a monthly schedule. A rerun fetches only returns it hasn't seen.
 - **Live layout:**
   - **Neon and Vercel** are both in US East, for fast pages.
   - **The monthly Dagster job is ready to deploy** to a small EU server (`deploy/setup.sh`, systemd units, the schedule switched on by one setting). That costs a fraction of a US server, and its SQL runs inside Neon either way.
@@ -87,5 +93,5 @@ A 990 never says which charter schools its filer holds, so a school stays unmatc
 - **Returns lag:** most cover a year ending June 2025.
 - **Low matching in Wisconsin (23%) and New Mexico (19%) is unexplained.** In Wisconsin, each district decides whether a charter is part of the district (Wis. Stat. 118.40(7)).
 - **Missed networks:** ones where each campus has its own website and the parent files elsewhere. Most Mater Academy campuses in Florida are unmatched, though matched ones now show Academica as manager.
-- **Ambiguous schools** (KIPP NYC, Great Hearts) need a correction or more evidence, such as Schedule R and the contractor list.
+- **Ambiguous schools** (KIPP NYC, Great Hearts) need a correction or more evidence. Schedule R is shown on each school but doesn't yet decide between tied operators.
 - **Accuracy is measured by spot checks only.**

@@ -123,13 +123,16 @@ export async function listSchools(
       LEFT JOIN filings f ON f.object_id = o.object_id
       LEFT JOIN LATERAL (
         -- The management company: a management contractor on the operator's
-        -- return, or else the linked management nonprofit.
+        -- return, or else the linked management nonprofit, or else a related
+        -- management organization on Schedule R.
         SELECT coalesce(
           (SELECT string_agg(DISTINCT c.name, ' and ') FROM filing_contractors c
             WHERE c.object_id = o.object_id AND c.is_management),
           (SELECT string_agg(DISTINCT xf.org_name, ' and ') FROM school_matches x
              JOIN filings xf ON xf.object_id = x.object_id
-            WHERE x.ncessch = s.ncessch AND x.role = 'management')
+            WHERE x.ncessch = s.ncessch AND x.role = 'management'),
+          (SELECT string_agg(DISTINCT l.related_name, ' and ') FROM related_links l
+            WHERE l.ein = f.ein AND l.kind = 'management')
         ) AS managers
       ) mg ON true
       WHERE ${includeClosed ? sql`true` : sql`s.is_operating`}
@@ -148,7 +151,10 @@ export async function listSchools(
                        AND (nf.org_name ILIKE ${pattern} OR nf.dba_name ILIKE ${pattern}))
           OR EXISTS (SELECT 1 FROM school_matches m JOIN filing_contractors c ON c.object_id = m.object_id
                      WHERE m.ncessch = s.ncessch AND m.role = 'operator' AND c.is_management
-                       AND c.name ILIKE ${pattern}))` : sql``}
+                       AND c.name ILIKE ${pattern})
+          OR EXISTS (SELECT 1 FROM school_matches m JOIN related_links l ON l.ein = m.ein
+                     WHERE m.ncessch = s.ncessch AND m.role = 'operator' AND l.kind = 'management'
+                       AND l.related_name ILIKE ${pattern}))` : sql``}
     ),
     page AS (
       SELECT * FROM matched
@@ -252,6 +258,18 @@ export type Contractor = {
   is_management: boolean;
 };
 
+// What Schedule R says about an operator: its management organization or a
+// fellow nonprofit in its network (pipeline/src/charter990/assets/related.py).
+export type Related = {
+  ein: string;
+  related_ein: string;
+  related_name: string;
+  kind: "management" | "network";
+  services_amt: string | null;
+  related_schools: number;
+  evidence: { listed_on?: string; activity?: string; services?: boolean; shared_staff?: boolean };
+};
+
 export type StatusRow = { status: Status; reason: string | null; detail: Record<string, string | boolean> };
 
 export type Profile = {
@@ -260,6 +278,7 @@ export type Profile = {
   matches: Match[];
   people: Person[];
   contractors: Contractor[];
+  related: Related[];
 };
 
 // Roles a rep acts on get the full facts (leaders, contractors).
@@ -301,8 +320,16 @@ export async function schoolProfile(ncessch: string): Promise<Profile | null> {
         WHERE object_id IN ${sql(cardIds)}
         ORDER BY object_id, compensation DESC NULLS LAST, seq`
     : [];
+  const operatorEins = matches.filter((m) => m.role === "operator").map((m) => m.ein);
+  const related = operatorEins.length
+    ? await sql<Related[]>`
+        SELECT ein, related_ein, related_name, kind, services_amt, related_schools, evidence
+        FROM related_links
+        WHERE ein IN ${sql(operatorEins)}
+        ORDER BY kind, services_amt DESC NULLS LAST, related_schools DESC, related_name`
+    : [];
 
-  return { school, status: status ?? null, matches, people, contractors };
+  return { school, status: status ?? null, matches, people, contractors, related };
 }
 
 // --- Summary ------------------------------------------------------------------

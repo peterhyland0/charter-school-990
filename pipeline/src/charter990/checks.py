@@ -9,6 +9,7 @@ from .assets.bmf import bmf_candidates
 from .assets.extract import parsed_filings
 from .assets.ccd import ccd_schools
 from .assets.match import school_matches
+from .assets.related import related_links
 from .assets.returns import SELECT_LATEST, raw_returns
 from .assets.zips import zip_members
 from .resources import PostgresResource
@@ -339,3 +340,37 @@ def known_managers_named(pg: PostgresResource) -> AssetCheckResult:
                   "delegating_with_named_evidence": named},
     )
 
+
+# Schedule R links that must hold: (state, school nonprofit EIN, related EIN, kind).
+KNOWN_RELATED = [
+    ("OH", "731685362", "341938197", "management"),  # Summit Academy - Toledo, by Summit Academy Management
+    ("NY", "834247585", "203971209", "management"),  # KIPP NYC Public Charter Schools, by KIPP New York
+]
+# Related organisations that must never be linked: (EIN, why).
+NEVER_RELATED = {
+    "933319101": "Fermi Forward Discovery Group, which manages a physics lab for the university behind a charter",
+    "473612434": "Arizona Leasing Enterprises, a leasing company its schools describe as management",
+}
+
+
+@asset_check(asset=related_links, description="Known Schedule R management links hold, and known wrong ones stay out.")
+def known_related_links(pg: PostgresResource) -> AssetCheckResult:
+    problems = []
+    with pg.connect() as conn:
+        for st, ein, related_ein, kind in KNOWN_RELATED:
+            if STATE_FILTER not in (None, st):
+                continue
+            row = conn.execute(
+                "SELECT kind FROM related_links WHERE ein = %s AND related_ein = %s", (ein, related_ein)
+            ).fetchone()
+            if not row or row[0] != kind:
+                problems.append(f"{ein} -> {related_ein}: expected {kind}, got {row[0] if row else 'no link'}")
+        for related_ein, why in NEVER_RELATED.items():
+            (n,) = conn.execute("SELECT count(*) FROM related_links WHERE related_ein = %s", (related_ein,)).fetchone()
+            if n:
+                problems.append(f"{related_ein} linked {n} times ({why})")
+    return AssetCheckResult(
+        passed=not problems,
+        severity=AssetCheckSeverity.WARN,
+        metadata={"problems": "; ".join(problems) or "none"},
+    )

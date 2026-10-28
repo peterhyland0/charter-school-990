@@ -56,7 +56,7 @@ adjudicate:  ## Decide ambiguous and unmatched schools with the scored model and
 NEON_ENV = set -a && . $(CURDIR)/.env.neon && set +a && \
 	case "$$NEON_DATABASE_URL" in *neon.tech*) ;; \
 	  *) echo "NEON_DATABASE_URL missing or not a Neon URL: check .env.neon (quote the value)" >&2; exit 1 ;; esac
-CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people filing_contractors school_matches school_status match_corrections external_links adjudications
+CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people filing_contractors school_matches school_status match_corrections external_links adjudications related_links
 
 # The first load only. Once live, the scheduled pipeline keeps Neon current and
 # hand corrections are made there, so a reload would replace them with the
@@ -126,10 +126,10 @@ neon-reader:  ## Create web_reader or rotate its password; prints its pooled URL
 neon-roles:  ## Re-apply web_reader's read-only grants
 	@$(NEON_ENV) && psql -q -v ON_ERROR_STOP=1 "$$NEON_DATABASE_URL" -f db/roles/web_reader.sql && echo "web_reader can read"
 
-neon-rematch:  ## Rebuild only the matches in Neon from this Mac
+neon-rematch:  ## Rebuild only the matches and their Schedule R links in Neon from this Mac
 	@mkdir -p $(DAGSTER_HOME) && touch $(DAGSTER_HOME)/dagster.yaml
 	@$(NEON_ENV) && cd pipeline && DATABASE_URL="$$NEON_DATABASE_URL" \
-	  uv run dagster asset materialize -m charter990.definitions --select school_matches
+	  uv run dagster asset materialize -m charter990.definitions --select school_matches,related_orgs,related_links
 
 server-sync:  ## Copy the cached downloads to the server: make server-sync HOST=root@<ip>
 	rsync -az data/raw/ "$(HOST):/opt/charter990/data/raw/"
