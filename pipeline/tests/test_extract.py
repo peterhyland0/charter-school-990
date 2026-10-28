@@ -59,3 +59,17 @@ def test_batch_label_pattern():
     assert LABEL.match("2026_TEOS_XML_05A").groups() == ("2026", "05")
     assert LABEL.match("2025_TEOS_XML_11D")
     assert not LABEL.match("download990xml_2020_1")
+
+
+def test_filer_contact_details():
+    data = build(ein="<EIN>123456789</EIN><PhoneNum>6462777170</PhoneNum><USAddress><AddressLine1Txt>95 PINE ST</AddressLine1Txt><CityNm>NEW YORK</CityNm><StateAbbreviationCd>NY</StateAbbreviationCd><ZIPCd>100051234</ZIPCd></USAddress>")
+    filing, _ = parse_return(data)
+    assert filing["phone10"] == "6462777170"
+    assert (filing["street"], filing["city"], filing["state"], filing["zip5"]) == ("95 PINE ST", "NEW YORK", "NY", "10005")
+    assert filing["name_key"] == "EXAMPLE CHARTER SCHOOL"
+
+
+def test_return_without_namespace_parses():
+    data = build().replace(b' xmlns="http://www.irs.gov/efile"', b"")
+    filing, people = parse_return(data)
+    assert filing["ein"] == "123456789" and people[0]["name"] == "JANE DOE"

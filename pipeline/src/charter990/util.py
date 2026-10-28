@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 import shutil
 import tempfile
 from pathlib import Path
@@ -11,6 +13,8 @@ import requests
 import tldextract
 
 from .settings import HTTP_HEADERS
+
+log = logging.getLogger(__name__)
 
 # Bundled public suffix list only: deterministic and works offline.
 _EXTRACT = tldextract.TLDExtract(suffix_list_urls=())
@@ -68,10 +72,31 @@ def parse_bool(value: str | None) -> bool | None:
     return value.strip().lower() in _TRUE_VALUES
 
 
+# Responses that mean "try again later" rather than "this doesn't exist".
+RETRYABLE_STATUS = {403, 429, 500, 502, 503, 504}
+
+
+class SourceUnavailable(Exception):
+    """The source refused or failed repeatedly; callers may fall back to a cached copy."""
+
+
+def head_with_retry(url: str, attempts: int = 3, backoff: float = 5.0) -> requests.Response:
+    """HEAD with polite exponential backoff. Returns 2xx and 404 responses as is."""
+    for attempt in range(attempts):
+        resp = requests.head(url, headers=HTTP_HEADERS, timeout=30, allow_redirects=True)
+        if resp.status_code < 400 or resp.status_code == 404:
+            return resp
+        if resp.status_code not in RETRYABLE_STATUS or attempt == attempts - 1:
+            raise SourceUnavailable(f"HTTP {resp.status_code} for {url}")
+        time.sleep(backoff * 3 ** attempt)
+    raise SourceUnavailable(url)
+
+
 def _remote_stamp(url: str) -> str | None:
     """The server's ETag, or Last-Modified when there is no ETag."""
-    resp = requests.head(url, headers=HTTP_HEADERS, timeout=30, allow_redirects=True)
-    resp.raise_for_status()
+    resp = head_with_retry(url)
+    if resp.status_code == 404:
+        raise SourceUnavailable(f"HTTP 404 for {url}")
     return resp.headers.get("ETag") or resp.headers.get("Last-Modified")
 
 
@@ -86,7 +111,12 @@ def download_cached(url: str, dest: Path, refresh: bool = False) -> Path:
     if dest.exists() and dest.stat().st_size > 0:
         if not refresh:
             return dest
-        stamp = _remote_stamp(url)
+        try:
+            stamp = _remote_stamp(url)
+        except (SourceUnavailable, requests.RequestException) as exc:
+            # The source is unreachable right now: keep using the last good copy.
+            log.warning("using cached %s: %s", dest.name, exc)
+            return dest
         if stamp and stamp_file.exists() and stamp_file.read_text() == stamp:
             return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -136,4 +166,71 @@ def first_word(name: str | None) -> str | None:
     for word in _WORD.findall(name.upper()):
         if len(word) >= 3 and not word.isdigit() and word not in NAME_STOPWORDS:
             return word
+    return None
+
+
+_LEGAL_SUFFIXES = frozenset("INC INCORPORATED CORP CORPORATION LLC LTD CO THE".split())
+
+
+def name_key(name: str | None) -> str | None:
+    """A comparable form of an organisation or school name.
+
+    Uppercase, "&" as AND, punctuation removed, legal suffixes dropped. Generic
+    words like CHARTER and SCHOOL stay: the ZIP or city requirement on every
+    name signal already keeps unrelated schools apart.
+    """
+    if not name:
+        return None
+    words = [w for w in _WORD.findall(name.upper().replace("&", " AND ")) if w not in _LEGAL_SUFFIXES]
+    return " ".join(words) or None
+
+
+def phone10(raw: str | None) -> str | None:
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else None
+
+
+def zip5(raw: str | None) -> str | None:
+    digits = re.sub(r"\D", "", raw or "")
+    return digits[:5] if len(digits) >= 5 else None
+
+
+# Parent groups, boosters, alumni and similar support organisations. They often
+# share a school's name and website but never run the school.
+_SUPPORT_ORG = re.compile(
+    r"\b(BOOSTERS?|PTA|PTO|PTSA|PTSO|PARENT|PARENTS|ALUMNI|ATHLETIC|ATHLETICS|BAND|FRIENDS OF)\b"
+)
+
+
+def is_support_org(name: str | None) -> bool:
+    return bool(name and _SUPPORT_ORG.search(name.upper()))
+
+
+def meaningful_words(name: str | None) -> list[str]:
+    if not name:
+        return []
+    return [w for w in _WORD.findall(name.upper()) if len(w) >= 3 and not w.isdigit() and w not in NAME_STOPWORDS]
+
+
+def first_two(name: str | None) -> str | None:
+    words = meaningful_words(name)
+    return " ".join(words[:2]) if len(words) >= 2 else None
+
+
+def network_key(name: str | None, first_counts, two_counts, limit: int) -> str | None:
+    """The word or two that identify a network, such as KIPP or GREAT HEARTS.
+
+    Use the first meaningful word when it is distinctive (at most `limit`
+    nonprofits start with it); otherwise fall back to the first two words.
+    """
+    word = first_word(name)
+    if word is None:
+        return None
+    if first_counts.get(word, 0) <= limit:
+        return word
+    two = first_two(name)
+    if two is not None and two_counts.get(two, 0) <= limit:
+        return two
     return None

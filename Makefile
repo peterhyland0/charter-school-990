@@ -6,9 +6,16 @@ DAGSTER_PORT ?= 3070
 
 .PHONY: db pipeline dagster web test
 
-db:  ## Create the database and apply migrations (safe to rerun)
+db:  ## Create the database and apply each migration once, in order
 	@psql -lqt | cut -d'|' -f1 | grep -qw $(DB) || createdb $(DB)
-	@for f in db/migrations/*.sql; do psql -q -v ON_ERROR_STOP=1 -d $(DB) -f $$f; done
+	@psql -q -d $(DB) -c "CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
+	@for f in db/migrations/*.sql; do \
+	  n=$$(basename $$f); \
+	  if [ -z "$$(psql -qAt -d $(DB) -c "SELECT 1 FROM schema_migrations WHERE name = '$$n'")" ]; then \
+	    echo "applying $$n"; \
+	    psql -q -v ON_ERROR_STOP=1 -1 -d $(DB) -f $$f -c "INSERT INTO schema_migrations (name) VALUES ('$$n')" || exit 1; \
+	  fi; \
+	done
 
 pipeline:  ## Run every asset once, end to end
 	@mkdir -p $(DAGSTER_HOME) && touch $(DAGSTER_HOME)/dagster.yaml

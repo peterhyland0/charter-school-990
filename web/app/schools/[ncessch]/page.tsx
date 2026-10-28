@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import { sql } from "@/lib/db";
 import { day, formatEin, money, propublicaUrl } from "@/lib/format";
+import { reasonText, SIGNAL_LABEL, STATUS_CLASS, STATUS_LABEL, type Status } from "@/lib/labels";
 
 type School = {
   ncessch: string;
@@ -18,10 +19,14 @@ type School = {
   is_operating: boolean;
 };
 
+type Evidence = Record<string, Record<string, string | number | null>>;
+
 type Match = {
   ein: string;
-  tier: "domain_single" | "domain_multi";
-  evidence: { domain: string; school_website: string | null; filing_website: string | null };
+  tier: "verified" | "likely";
+  signals: string[];
+  ambiguous: boolean;
+  evidence: Evidence;
   object_id: string;
   org_name: string | null;
   return_type: string;
@@ -52,10 +57,25 @@ function managementLabel(m: Match): string {
   return m.mgmt_delegated ? "Yes, management duties are delegated" : "No";
 }
 
-function tierLabel(m: Match, count: number): string {
-  return m.tier === "domain_single"
-    ? "Matched by website"
-    : `Matched by website, shared with ${count - 1} other nonprofit${count > 2 ? "s" : ""}`;
+type StatusRow = { status: Status; reason: string | null; detail: Record<string, string | boolean> };
+
+// One line per agreeing signal, showing what was compared.
+function signalDetail(signal: string, e: Record<string, string | number | null> | undefined): string {
+  if (!e) return "";
+  switch (signal) {
+    case "website":
+      return `both list ${e.domain}`;
+    case "name_zip":
+      return `"${e.filing}" in ZIP ${e.zip} (similarity ${e.similarity})`;
+    case "name_city":
+      return `"${e.filing}" in ${e.city} (similarity ${e.similarity})`;
+    case "district_name":
+      return `district "${e.district}" vs "${e.filing}" (similarity ${e.similarity})`;
+    case "phone":
+      return `both list ${String(e.phone).replace(/(\d{3})(\d{3})(\d{4})/, "($1) $2-$3")}`;
+    default:
+      return "";
+  }
 }
 
 async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]">["params"] }) {
@@ -63,15 +83,17 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
   const [school] = await sql<School[]>`SELECT * FROM schools WHERE ncessch = ${ncessch}`;
   if (!school) notFound();
 
+  const [status] = await sql<StatusRow[]>`SELECT status, reason, detail FROM school_status WHERE ncessch = ${ncessch}`;
   const matches = await sql<Match[]>`
-    SELECT m.ein, m.tier, m.evidence, f.object_id, f.org_name, f.return_type,
+    SELECT m.ein, m.tier, m.signals, m.ambiguous, m.evidence, f.object_id, f.org_name, f.return_type,
            f.tax_period_begin, f.tax_period_end, f.return_ts, f.amended,
            f.total_revenue, f.mgmt_delegated, f.source_zip, b.state AS filer_state
     FROM school_matches m
     JOIN filings f ON f.object_id = m.object_id
     LEFT JOIN bmf_orgs b ON b.ein = m.ein
     WHERE m.ncessch = ${ncessch}
-    ORDER BY (b.state = ${school.st}) DESC NULLS LAST, f.total_revenue DESC NULLS LAST`;
+    ORDER BY (m.tier = 'verified') DESC, cardinality(m.signals) DESC,
+             (b.state = ${school.st}) DESC NULLS LAST, f.total_revenue DESC NULLS LAST`;
 
   const people = matches.length
     ? await sql<Person[]>`
@@ -85,7 +107,14 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
   return (
     <main>
       <Link href="/" className="text-sm opacity-70 hover:underline">← Search</Link>
-      <h1 className="mt-2 text-2xl font-semibold">{school.sch_name}</h1>
+      <div className="mt-2 flex flex-wrap items-center gap-3">
+        <h1 className="text-2xl font-semibold">{school.sch_name}</h1>
+        {status && (
+          <span className={`rounded px-2 py-0.5 text-sm ${STATUS_CLASS[status.status]}`}>
+            {STATUS_LABEL[status.status]}
+          </span>
+        )}
+      </div>
       <p className="mt-1 text-sm opacity-70">
         {[school.lstreet1, school.lcity, school.st, school.lzip].filter(Boolean).join(", ")}
         {school.phone && ` · ${school.phone}`}
@@ -105,13 +134,18 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
 
       {matches.length === 0 && (
         <section className="mt-6 rounded border border-black/15 p-4 dark:border-white/20">
-          <h2 className="font-semibold">No nonprofit matched yet</h2>
+          <h2 className="font-semibold">No nonprofit matched</h2>
           <p className="mt-1 text-sm opacity-80">
-            {school.website_domain
-              ? `No candidate nonprofit's latest return lists this school's website domain (${school.website_domain}).`
-              : "This school has no website in the NCES directory, so the website match can't run."}
+            {status ? reasonText(status.reason, status.detail) : "This school isn't operating, so it wasn't matched."}
           </p>
         </section>
+      )}
+
+      {matches.some((m) => m.ambiguous) && (
+        <p className="mt-6 rounded bg-amber-500/10 p-3 text-sm">
+          More than one nonprofit matches equally well. Often one runs the school and another is its network or
+          management organization; check the signals below.
+        </p>
       )}
 
       {matches.map((m) => {
@@ -120,16 +154,22 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
           <section key={m.ein} className="mt-6 rounded border border-black/15 p-4 dark:border-white/20">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h2 className="text-lg font-semibold">{m.org_name}</h2>
-              <span className="rounded bg-black/5 px-2 py-0.5 text-xs dark:bg-white/10">
-                {tierLabel(m, matches.length)}
+              <span className={`rounded px-2 py-0.5 text-xs ${STATUS_CLASS[m.tier]}`}>
+                {STATUS_LABEL[m.tier]} match
               </span>
             </div>
             <p className="text-sm opacity-70">
               EIN {formatEin(m.ein)}
               {m.filer_state && ` · registered in ${m.filer_state}`}
-              {m.filer_state && m.filer_state !== school.st && " (out of state)"} · school site {m.evidence.school_website} and the return&apos;s site{" "}
-              {m.evidence.filing_website} share {m.evidence.domain}
+              {m.filer_state && m.filer_state !== school.st && " (out of state)"}
             </p>
+            <ul className="mt-2 text-sm">
+              {m.signals.map((sig) => (
+                <li key={sig}>
+                  <span className="font-medium">{SIGNAL_LABEL[sig] ?? sig}:</span> {signalDetail(sig, m.evidence[sig])}
+                </li>
+              ))}
+            </ul>
 
             <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
               <div>

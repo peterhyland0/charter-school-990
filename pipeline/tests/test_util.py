@@ -35,3 +35,38 @@ def test_first_word_skips_filler():
     assert first_word("KIPP NYC College Prep") == "KIPP"
     assert first_word("The New York City Charter School of the Arts") == "ARTS"
     assert first_word("Success Academy Charter School - Harlem 1") == "SUCCESS"
+
+
+from charter990.util import first_two, is_support_org, name_key, network_key, phone10, zip5
+
+
+def test_name_key_drops_legal_suffixes_and_punctuation():
+    assert name_key("KIPP NYC College Prep") == "KIPP NYC COLLEGE PREP"
+    assert name_key("The Academy Charter School, Inc.") == "ACADEMY CHARTER SCHOOL"
+    assert name_key("Arts & Sciences Academy") == "ARTS AND SCIENCES ACADEMY"
+    assert name_key("") is None
+
+
+def test_phone_and_zip():
+    assert phone10("(718)635-3294") == "7186353294"
+    assert phone10("1-646-277-7170") == "6462777170"
+    assert phone10("635-3294") is None
+    assert zip5("10005-1234") == "10005"
+    assert zip5("123") is None
+
+
+def test_support_orgs():
+    assert is_support_org("BASIS Scottsdale Boosters")
+    assert is_support_org("FRIENDS OF THE HARLEM ACADEMY")
+    assert is_support_org("Lincoln Charter School PTO Inc")
+    assert not is_support_org("Great Hearts Academies - Veritas")
+    assert not is_support_org("Bandera Charter School")  # BAND is a whole word only
+
+
+def test_network_key_falls_back_to_two_words():
+    firsts = {"KIPP": 56, "GREAT": 1724}
+    twos = {"GREAT HEARTS": 12}
+    assert network_key("KIPP NYC College Prep", firsts, twos, 200) == "KIPP"
+    assert network_key("Great Hearts Academies - Veritas", firsts, twos, 200) == "GREAT HEARTS"
+    assert first_two("Great Hearts Academies - Veritas") == "GREAT HEARTS"
+    assert network_key("Great Oaks Charter School", firsts, {"GREAT OAKS": 500}, 200) is None

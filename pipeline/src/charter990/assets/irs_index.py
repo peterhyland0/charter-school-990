@@ -16,7 +16,7 @@ COLUMNS = (
 )
 
 
-@asset(group_name="phase0", deps=[bmf_candidates], description="Index rows for candidate EINs (990 and 990-EZ only), across index years.")
+@asset(group_name="pipeline", deps=[bmf_candidates], description="Index rows for candidate EINs (990 and 990-EZ only), across index years.")
 def irs_index(pg: PostgresResource) -> MaterializeResult:
     with pg.connect() as conn:
         pool = {e for (e,) in conn.execute("SELECT ein FROM bmf_orgs").fetchall()}

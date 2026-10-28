@@ -8,24 +8,27 @@ from dagster import MaterializeResult, asset
 from lxml import etree
 
 from ..resources import PostgresResource
-from ..util import normalize_site, parse_bool
+from ..util import name_key, normalize_site, parse_bool, phone10, zip5
 from .returns import SELECT_LATEST, raw_returns, xml_path
 
-PARSER_VERSION = "0.1"
+PARSER_VERSION = "0.3"
 STAGE = "parse"
-NS = {"e": "http://www.irs.gov/efile"}
 # Returns are untrusted input: no entity expansion, no network access.
 PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
 
 
-def _xp(path: str) -> str:
-    return "/".join(f"e:{part}" for part in path.split("/"))
+def _strip_namespaces(root) -> None:
+    """Most returns use the http://www.irs.gov/efile namespace but some omit it,
+    so match on local tag names only."""
+    for el in root.iter():
+        if isinstance(el.tag, str) and el.tag.startswith("{"):
+            el.tag = el.tag.split("}", 1)[1]
 
 
 def _text(node, *paths: str) -> str | None:
     """First non-empty text among the given paths (newer names first)."""
     for path in paths:
-        found = node.find(_xp(path), NS)
+        found = node.find(path)
         if found is not None and found.text and found.text.strip():
             return found.text.strip()
     return None
@@ -59,19 +62,22 @@ def _person_name(group) -> str | None:
 
 def parse_return(data: bytes) -> tuple[dict, list[dict]]:
     root = etree.fromstring(data, PARSER)
-    header = root.find("e:ReturnHeader", NS)
+    _strip_namespaces(root)
+    header = root.find("ReturnHeader")
     if header is None:
         raise ValueError("no ReturnHeader")
     return_type = _text(header, "ReturnTypeCd")
     if return_type not in ("990", "990EZ"):
         raise ValueError(f"unsupported return type {return_type!r}")
     is_ez = return_type == "990EZ"
-    body = root.find(_xp("ReturnData/IRS990EZ" if is_ez else "ReturnData/IRS990"), NS)
+    body = root.find("ReturnData/IRS990EZ" if is_ez else "ReturnData/IRS990")
     if body is None:
         raise ValueError(f"no form body for return type {return_type!r}")
 
     website = _text(body, "WebsiteAddressTxt")
     host, domain = normalize_site(website)
+    org_name = _text(header, "Filer/BusinessName/BusinessNameLine1Txt", "Filer/BusinessName/BusinessNameLine1")
+    dba_name = _text(body, "DoingBusinessAsName/BusinessNameLine1Txt")
     filing = {
         "ein": _text(header, "Filer/EIN"),
         "return_type": return_type,
@@ -80,19 +86,28 @@ def parse_return(data: bytes) -> tuple[dict, list[dict]]:
         "tax_period_end": _date(_text(header, "TaxPeriodEndDt")),
         "return_ts": _ts(_text(header, "ReturnTs")),
         "amended": bool(parse_bool(_text(body, "AmendedReturnInd"))),
-        "org_name": _text(header, "Filer/BusinessName/BusinessNameLine1Txt", "Filer/BusinessName/BusinessNameLine1"),
-        "dba_name": _text(body, "DoingBusinessAsName/BusinessNameLine1Txt"),
+        "org_name": org_name,
+        "dba_name": dba_name,
         "website": website,
         "website_host": host,
         "website_domain": domain,
         "total_revenue": _int(_text(body, "TotalRevenueAmt" if is_ez else "CYTotalRevenueAmt")),
         # 990-EZ does not ask whether management was delegated.
         "mgmt_delegated": None if is_ez else parse_bool(_text(body, "DelegationOfMgmtDutiesInd")),
+        # The filer's own contact details, used as matching signals. Foreign
+        # addresses have no USAddress block and stay empty.
+        "phone10": phone10(_text(header, "Filer/PhoneNum")),
+        "street": _text(header, "Filer/USAddress/AddressLine1Txt", "Filer/USAddress/AddressLine1"),
+        "city": _text(header, "Filer/USAddress/CityNm", "Filer/USAddress/City"),
+        "state": _text(header, "Filer/USAddress/StateAbbreviationCd", "Filer/USAddress/State"),
+        "zip5": zip5(_text(header, "Filer/USAddress/ZIPCd", "Filer/USAddress/ZIPCode")),
+        "name_key": name_key(org_name),
+        "dba_key": name_key(dba_name),
     }
 
     people = []
     if is_ez:
-        for g in body.findall("e:OfficerDirectorTrusteeEmplGrp", NS):
+        for g in body.findall("OfficerDirectorTrusteeEmplGrp"):
             benefits = (_int(_text(g, "EmployeeBenefitProgramAmt")) or 0) + (_int(_text(g, "ExpenseAccountOtherAllwncAmt")) or 0)
             people.append({
                 "name": _person_name(g), "title": _text(g, "TitleTxt"),
@@ -102,7 +117,7 @@ def parse_return(data: bytes) -> tuple[dict, list[dict]]:
                 "is_officer": False, "is_director": False, "is_key_employee": False, "is_hce": False,
             })
     else:
-        for g in body.findall("e:Form990PartVIISectionAGrp", NS):
+        for g in body.findall("Form990PartVIISectionAGrp"):
             people.append({
                 "name": _person_name(g), "title": _text(g, "TitleTxt"),
                 "avg_hours": _num(_text(g, "AverageHoursPerWeekRt")),
@@ -123,6 +138,7 @@ FILING_COLUMNS = (
     "ein", "return_type", "return_version", "tax_period_begin", "tax_period_end",
     "return_ts", "amended", "org_name", "dba_name", "website", "website_host",
     "website_domain", "total_revenue", "mgmt_delegated",
+    "phone10", "street", "city", "state", "zip5", "name_key", "dba_key",
 )
 PEOPLE_COLUMNS = (
     "name", "title", "avg_hours", "comp_org", "comp_related", "comp_other",
@@ -152,11 +168,14 @@ def _store(conn, object_id: str, zip_name: str, data: bytes, filing: dict, peopl
         ])
 
 
-@asset(group_name="phase0", deps=[raw_returns], description="Parsed facts and people for each cached return.")
+@asset(group_name="pipeline", deps=[raw_returns], description="Parsed facts and people for each cached return.")
 def parsed_filings(pg: PostgresResource) -> MaterializeResult:
-    parsed = failed = people_rows = 0
+    parsed = failed = people_rows = unchanged = 0
     with pg.connect() as conn:
         selected = conn.execute(SELECT_LATEST).fetchall()
+        existing = dict(conn.execute(
+            "SELECT object_id, sha256 FROM filings WHERE parser_version = %s", (PARSER_VERSION,)
+        ).fetchall())
         conn.execute("DELETE FROM load_errors WHERE stage = %s", (STAGE,))
         # Drop filings that are no longer selected, for example because their
         # nonprofit left the candidate pool, so they can't match schools.
@@ -168,6 +187,9 @@ def parsed_filings(pg: PostgresResource) -> MaterializeResult:
             if zip_name is None or not path.exists():
                 continue  # the fetch failure is already logged
             data = path.read_bytes()
+            if existing.get(object_id) == hashlib.sha256(data).hexdigest():
+                unchanged += 1  # same file, same parser: nothing to redo
+                continue
             try:
                 filing, people = parse_return(data)
                 # A savepoint per return: a database error rolls back this one only.
@@ -181,5 +203,6 @@ def parsed_filings(pg: PostgresResource) -> MaterializeResult:
             people_rows += len(people)
 
     return MaterializeResult(metadata={
-        "parsed": parsed, "failed": failed, "people_rows": people_rows, "pruned": pruned,
+        "parsed": parsed, "unchanged": unchanged, "failed": failed,
+        "people_rows_written": people_rows, "pruned": pruned,
     })

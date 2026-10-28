@@ -22,6 +22,10 @@ STAGE = "fetch"
 TIMEOUT = (15, 60)
 # Errors that retrying can't fix, such as an unsupported compression method.
 PERMANENT_ERRORS = (NotImplementedError, zipfile.BadZipFile, KeyError)
+# Big zips are split so one worker isn't left reading thousands of returns alone.
+CHUNK_SIZE = 500
+# Kept modest: the IRS host blocks clients that send too many requests at once.
+MAX_WORKERS = 4
 
 # Every return for each EIN's newest tax period, across all index years, so an
 # amended return and the original it replaces are both fetched and the parser
@@ -97,7 +101,7 @@ def _fetch_zip(zip_url: str, object_ids: list[str]) -> tuple[int, list[tuple[str
     return fetched, errors
 
 
-@asset(group_name="phase0", deps=[zip_members], description="Cache the latest return per candidate EIN as XML on disk.")
+@asset(group_name="pipeline", deps=[zip_members], description="Cache the latest return per candidate EIN as XML on disk.")
 def raw_returns(pg: PostgresResource) -> MaterializeResult:
     XML_DIR.mkdir(parents=True, exist_ok=True)
     with pg.connect() as conn:
@@ -110,9 +114,14 @@ def raw_returns(pg: PostgresResource) -> MaterializeResult:
         elif not xml_path(object_id).exists():
             todo[zip_url].append(object_id)
 
+    chunks = [
+        (zip_url, ids[i:i + CHUNK_SIZE])
+        for zip_url, ids in todo.items()
+        for i in range(0, len(ids), CHUNK_SIZE)
+    ]
     fetched = 0
-    with ThreadPoolExecutor(max_workers=max(1, len(todo))) as pool:
-        for n, errs in pool.map(lambda item: _fetch_zip(*item), todo.items()):
+    with ThreadPoolExecutor(max_workers=max(1, min(MAX_WORKERS, len(chunks)))) as pool:
+        for n, errs in pool.map(lambda chunk: _fetch_zip(*chunk), chunks):
             fetched += n
             errors.extend(errs)
 
