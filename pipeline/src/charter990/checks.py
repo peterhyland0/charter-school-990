@@ -32,7 +32,7 @@ KNOWN_NETWORK_EINS = {
 }
 MAX_FAILURE_RATE = 0.05
 MIN_MATCH_RATE = 0.5
-# Role expectations for known networks: (school website, EIN, expected role).
+# Role expectations for known networks: (school website, state, EIN, expected role).
 KNOWN_ROLES = [
     ("ideapublicschools.org", "TX", "742948339", "operator"),       # IDEA Public Schools
     ("successacademies.org", "NY", "364629540", "operator"),        # Success Academy Charter Schools - NYC
@@ -47,6 +47,23 @@ NEVER_LINKED = {
 # umbrella (an authorizer) that UMBRELLA_LEAIDS misses.
 UMBRELLA_WATCH_SCHOOLS = 10
 UMBRELLA_WATCH_OPERATORS = 5
+
+# Each active correction, whether its school still operates, and whether the
+# matches reflect it. Shared with the correction tool, which checks its own
+# correction right after rebuilding.
+CORRECTION_STATE = """
+    SELECT c.id, c.action, c.ncessch, c.ein, coalesce(s.is_operating, false) AS operating,
+           CASE c.action
+               WHEN 'link' THEN EXISTS (SELECT 1 FROM school_matches m WHERE m.ncessch = c.ncessch
+                                        AND m.ein = c.ein AND m.role = 'operator' AND m.source = 'corrected')
+               WHEN 'unlink' THEN NOT EXISTS (SELECT 1 FROM school_matches m
+                                              WHERE m.ncessch = c.ncessch AND m.ein = c.ein)
+               ELSE EXISTS (SELECT 1 FROM school_status st WHERE st.ncessch = c.ncessch
+                            AND st.reason = 'corrected_none')
+           END AS holds
+    FROM match_corrections c LEFT JOIN schools s USING (ncessch)
+    WHERE c.retired_at IS NULL
+"""
 
 
 @asset_check(asset=ccd_schools, description="Operating charter count matches the CCD file.")
@@ -125,19 +142,7 @@ def match_rate(pg: PostgresResource) -> AssetCheckResult:
 @asset_check(asset=school_matches, description="Every active hand correction is reflected in the matches.")
 def corrections_hold(pg: PostgresResource) -> AssetCheckResult:
     with pg.connect() as conn:
-        rows = conn.execute(
-            """SELECT c.id, c.action, c.ncessch, c.ein, s.is_operating,
-                      CASE c.action
-                          WHEN 'link' THEN EXISTS (SELECT 1 FROM school_matches m WHERE m.ncessch = c.ncessch
-                                                   AND m.ein = c.ein AND m.role = 'operator' AND m.source = 'corrected')
-                          WHEN 'unlink' THEN NOT EXISTS (SELECT 1 FROM school_matches m
-                                                         WHERE m.ncessch = c.ncessch AND m.ein = c.ein)
-                          ELSE EXISTS (SELECT 1 FROM school_status st WHERE st.ncessch = c.ncessch
-                                       AND st.reason = 'corrected_none')
-                      END AS holds
-               FROM match_corrections c LEFT JOIN schools s USING (ncessch)
-               WHERE c.retired_at IS NULL"""
-        ).fetchall()
+        rows = conn.execute(CORRECTION_STATE).fetchall()
     orphaned = [r[0] for r in rows if not r[4]]
     broken = [r[0] for r in rows if r[4] and not r[5]]
     return AssetCheckResult(

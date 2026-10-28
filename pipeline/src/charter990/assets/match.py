@@ -11,7 +11,9 @@ Five signals are computed in SQL for every school and candidate nonprofit:
 A sixth, district_group, spreads a verified link across a charter district:
 the district is one legal nonprofit, so its schools share it.
 
-A pair is verified when two or more signals agree and likely when one does.
+A pair is verified when two or more independent signals agree and likely when
+one does. district_name and district_group both come from the school's
+district, so together they count once.
 Among the nonprofits tied for a school's best tier, ordered rules decide which
 one runs the school and what the others are (management, support, affiliate).
 Hand corrections are applied last, so they always win and survive reruns.
@@ -175,11 +177,16 @@ BUILD_PAIRS = [
     """CREATE TEMP TABLE pairs ON COMMIT DROP AS
        SELECT ncessch, ein, min(object_id) AS object_id,
               array_agg(DISTINCT signal ORDER BY signal) AS signals,
-              jsonb_object_agg(signal, evidence) AS evidence
+              jsonb_object_agg(signal, evidence) AS evidence,
+              0 AS strength
        FROM cand GROUP BY ncessch, ein""",
     # The same ZIP implies the same city, so don't count the name twice.
     """UPDATE pairs SET signals = array_remove(signals, 'name_city')
        WHERE 'name_zip' = ANY(signals) AND 'name_city' = ANY(signals)""",
+    # Independent evidence: the two district signals count as one.
+    """UPDATE pairs SET strength = (
+           SELECT count(DISTINCT CASE WHEN x IN ('district_name', 'district_group') THEN 'district' ELSE x END)
+           FROM unnest(signals) AS x)""",
 ]
 
 # A charter district is one legal nonprofit, so a nonprofit verified for one
@@ -190,7 +197,7 @@ DISTRICT_GROUP = """
     WITH verified AS (
         SELECT s.leaid, s.lea_name, p.ein, p.object_id, count(*) AS n
         FROM pairs p JOIN ops s USING (ncessch) JOIN lf f ON f.object_id = p.object_id
-        WHERE cardinality(p.signals) >= 2 AND s.lea_type = '7' AND NOT s.umbrella
+        WHERE p.strength >= 2 AND s.lea_type = '7' AND NOT s.umbrella
           AND f.state = s.st AND f.org_name !~* %(support_name)s
         GROUP BY 1, 2, 3, 4
     )
@@ -200,7 +207,7 @@ DISTRICT_GROUP = """
     FROM ops s JOIN verified v ON v.leaid = s.leaid
     LEFT JOIN LATERAL (
         SELECT 1 AS self FROM pairs p
-        WHERE p.ncessch = s.ncessch AND p.ein = v.ein AND cardinality(p.signals) >= 2
+        WHERE p.ncessch = s.ncessch AND p.ein = v.ein AND p.strength >= 2
     ) own ON true
     -- At least one verified school other than this one.
     WHERE v.n - coalesce(own.self, 0) >= 1
@@ -210,18 +217,25 @@ DISTRICT_GROUP = """
 # school's best tier. Each rule only sets pairs aside when some tied pair
 # survives it, so a school never loses its last candidate.
 ROLES = [
-    f"""CREATE TEMP TABLE r ON COMMIT DROP AS
-        SELECT p.*, CASE WHEN cardinality(p.signals) >= 2 THEN 'verified' ELSE 'likely' END AS tier,
-               cardinality(p.signals) >= 2 AS strong,
-               -- In the school's state, and not named for another state.
+    """CREATE TEMP TABLE r ON COMMIT DROP AS
+        SELECT p.*, CASE WHEN p.strength >= 2 THEN 'verified' ELSE 'likely' END AS tier,
+               p.strength >= 2 AS strong,
+               -- In the school's state, and not named for another state. A
+               -- state whose name sits inside the school's own state's name
+               -- (VIRGINIA in WEST VIRGINIA) doesn't count, and nor does
+               -- WASHINGTON, which in names is usually a person or DC.
                f.state = s.st AND NOT EXISTS (
-                   SELECT 1 FROM states x WHERE x.code <> s.st AND (' ' || f.name_key || ' ') LIKE ('%% ' || x.name || ' %%')
+                   SELECT 1 FROM states x JOIN states own ON own.code = s.st
+                   WHERE x.code <> s.st AND x.name <> 'WASHINGTON' AND position(x.name IN own.name) = 0
+                     AND (' ' || f.name_key || ' ') LIKE ('%% ' || x.name || ' %%')
                ) AS in_state,
                f.org_name ~* %(support_name)s AS support,
                f.mgmt_delegated AS delegates,
                similarity(s.name_key, f.name_key) AS name_sim,
                NULL::text AS role
         FROM pairs p JOIN ops s USING (ncessch) JOIN lf f ON f.object_id = p.object_id""",
+    # The rules below look up other pairs of the same school.
+    "CREATE INDEX ON r (ncessch)",
     """UPDATE r SET role = 'other'
        WHERE NOT strong AND EXISTS (SELECT 1 FROM r x WHERE x.ncessch = r.ncessch AND x.strong)""",
     """UPDATE r SET role = 'affiliate'
@@ -236,10 +250,14 @@ ROLES = [
        WHERE role IS NULL AND support AND ncessch IN (SELECT ncessch FROM home)
          AND EXISTS (SELECT 1 FROM r x WHERE x.ncessch = r.ncessch AND x.role IS NULL AND NOT x.support)""",
     # Some tied nonprofits delegate management and some don't: the ones that
-    # delegate run schools, and the ones they delegate to manage them.
+    # delegate run schools, and the ones they delegate to manage them. Not when
+    # the non-delegating one is clearly the school's namesake and the
+    # delegating ones aren't (ASU Prep Academy Inc versus a university entity
+    # that shares asu.edu): then the delegating ones are unrelated.
     """UPDATE r SET role = 'management'
        WHERE role IS NULL AND delegates IS FALSE AND ncessch IN (SELECT ncessch FROM home)
-         AND EXISTS (SELECT 1 FROM r x WHERE x.ncessch = r.ncessch AND x.role IS NULL AND x.delegates)""",
+         AND EXISTS (SELECT 1 FROM r x WHERE x.ncessch = r.ncessch AND x.role IS NULL AND x.delegates
+                     AND x.name_sim >= r.name_sim - %(name_margin)s)""",
     # A nonprofit the school points at directly (website, phone, name) beats
     # one that only shares a name with the school's district.
     """UPDATE r SET role = 'related'

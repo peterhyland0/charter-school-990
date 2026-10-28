@@ -32,19 +32,23 @@ test:
 	cd pipeline && uv run pytest -q
 
 # Hand corrections. Each one is applied on every run, so it survives reruns.
-CORRECT = @mkdir -p $(DAGSTER_HOME) && touch $(DAGSTER_HOME)/dagster.yaml && cd pipeline && uv run python -m charter990.correct
+# Values are read from the environment ($$NOTE, not $(NOTE)) so a note with
+# quotes or backticks reaches the tool as typed instead of being parsed by the
+# shell. BY="Jane Doe" records who made the fix (default: your login).
+CORRECT = @mkdir -p $(DAGSTER_HOME) && touch $(DAGSTER_HOME)/dagster.yaml && cd pipeline && \
+	CORRECTED_BY="$$BY" uv run python -m charter990.correct
 
 correct:  ## This nonprofit runs this school: make correct SCHOOL=<ncessch> EIN=<ein> NOTE="why"
-	$(CORRECT) add --action link --school "$(SCHOOL)" --ein "$(EIN)" --note "$(NOTE)"
+	$(CORRECT) add --action link --school "$$SCHOOL" --ein "$$EIN" --note "$$NOTE"
 
 unlink:  ## This nonprofit has nothing to do with this school: make unlink SCHOOL=… EIN=… NOTE="why"
-	$(CORRECT) add --action unlink --school "$(SCHOOL)" --ein "$(EIN)" --note "$(NOTE)"
+	$(CORRECT) add --action unlink --school "$$SCHOOL" --ein "$$EIN" --note "$$NOTE"
 
 no-nonprofit:  ## This school has no nonprofit: make no-nonprofit SCHOOL=… NOTE="why"
-	$(CORRECT) add --action none --school "$(SCHOOL)" --note "$(NOTE)"
+	$(CORRECT) add --action none --school "$$SCHOOL" --note "$$NOTE"
 
 corrections:  ## List active corrections
 	$(CORRECT) list
 
 retire:  ## Undo a correction: make retire ID=<id>
-	$(CORRECT) retire --id "$(ID)"
+	$(CORRECT) retire --id "$$ID"

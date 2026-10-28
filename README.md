@@ -39,7 +39,8 @@ make corrections                                         # list active correctio
 make retire ID=<id>                                      # undo one
 ```
 
-The NCES id is on each school page. The school page shows a "Set by hand" badge with
+Add `BY="Your Name"` to record who made the fix (default: your login). The NCES id
+is on each school page. The school page shows a "Set by hand" badge with
 the note, and the `corrections_hold` Dagster check fails if a correction stops applying.
 
 ## Layout
