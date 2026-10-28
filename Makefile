@@ -40,7 +40,7 @@ CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people scho
 
 neon-load:  ## Copy the local database into Neon, replacing what's there
 	@$(NEON_ENV) && pg_dump --no-owner --no-acl --no-comments --clean --if-exists "$(DATABASE_URL)" \
-	  | psql -q -v ON_ERROR_STOP=1 "$$NEON_DATABASE_URL"
+	  | psql -q -v ON_ERROR_STOP=1 -o /dev/null "$$NEON_DATABASE_URL"
 	@echo "loaded; run make neon-check"
 
 neon-check:  ## Row counts, local versus Neon
