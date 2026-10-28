@@ -6,8 +6,10 @@ Each label says which nonprofit runs a school (EIN), or that it has none, and
 names its management company. A method's answer for a school is:
 - the matcher: its single operator, none if unmatched, or "ambiguous" when
   several nonprofits tie;
-- an adjudicator (the scored model or the LLM): its decision where it made one
-  (ambiguous and unmatched schools), otherwise the matcher's answer.
+- an adjudicator (the scored model or Jev): its decision where it made one
+  (ambiguous and unmatched schools), otherwise the matcher's answer. A none
+  for a school the matcher left tied is an abstention, not a claim that the
+  school has no nonprofit, so it keeps the matcher's "ambiguous".
 """
 
 import csv
@@ -101,6 +103,17 @@ def operator_outcome(label: dict, answer: str | None, ambiguous: bool) -> str:
     return "right" if answer == label["operator_ein"] else "wrong"
 
 
+def method_answer(decided: bool, chosen: str | None, base: str | None, ambiguous: bool) -> tuple[str | None, bool]:
+    """(answer, still ambiguous) for an adjudicator, given the matcher's answer.
+
+    decided: the adjudicator made a decision for this school; chosen is its EIN
+    or None. A None where the matcher tied abstains, so the tie stands.
+    """
+    if decided and (chosen is not None or not ambiguous):
+        return chosen, False
+    return base, ambiguous
+
+
 def manager_outcome(label: dict, managers: list[str]) -> str:
     truth = (label.get("management_company") or "").strip()
     says_none = truth.lower() in ("", "none", "null")
@@ -129,10 +142,11 @@ def evaluate(dsn: str) -> str:
         line = {"school": label.get("school", label["ncessch"]), "group": label["group"],
                 "truth": "no nonprofit" if label["no_nonprofit"] else (label["operator_ein"] or "?")}
         for m in methods:
-            if m != "matcher" and label["ncessch"] in decided[m]:
-                answer, amb = decided[m][label["ncessch"]], False
-            else:
+            if m == "matcher":
                 answer, amb = base, ambiguous
+            else:
+                answer, amb = method_answer(label["ncessch"] in decided[m], decided[m].get(label["ncessch"]),
+                                            base, ambiguous)
             outcome = operator_outcome(label, answer, amb)
             tally[m][label["group"]][outcome] += 1
             tally[m]["all"][outcome] += 1

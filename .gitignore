@@ -24,6 +24,7 @@ node_modules/
 # Secrets and OS
 .env
 .env.*
+.env.jev
 !.env.example
 !.env.*.example
 .DS_Store

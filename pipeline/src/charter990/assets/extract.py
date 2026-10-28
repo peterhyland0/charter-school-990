@@ -20,7 +20,7 @@ from ..util import (
 )
 from .returns import SELECT_LATEST, raw_returns, xml_path
 
-PARSER_VERSION = "0.6"
+PARSER_VERSION = "0.7"
 STAGE = "parse"
 # Returns are untrusted input: no entity expansion, no network access.
 PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
@@ -79,6 +79,22 @@ def _mgmt_explanation(root) -> str | None:
     return "\n\n".join(p for p in parts if p) or None
 
 
+# Long enough for a network's list of the schools it runs; some returns run to
+# hundreds of thousands of characters of boilerplate.
+SCHEDULE_O_MAX_CHARS = 8000
+
+
+def _schedule_o_text(root) -> str | None:
+    """Every Schedule O entry as "<line reference>: <explanation>", capped."""
+    parts = []
+    for d in root.findall("ReturnData/IRS990ScheduleO/SupplementalInformationDetail"):
+        ref = _text(d, "FormAndLineReferenceDesc")
+        explanation = _text(d, "ExplanationTxt", "ShortExplanationTxt")
+        if explanation:
+            parts.append(f"{ref}: {explanation}" if ref else explanation)
+    return "\n\n".join(parts)[:SCHEDULE_O_MAX_CHARS] or None
+
+
 def _contractors(body, explanation: str | None) -> list[dict]:
     """Part VII Section B: the five highest-paid independent contractors."""
     rows = []
@@ -135,6 +151,7 @@ def parse_return(data: bytes) -> tuple[dict, list[dict], list[dict]]:
         "total_liabilities": _int(_text(body, "SumOfTotalLiabilitiesGrp/EOYAmt" if is_ez else "TotalLiabilitiesEOYAmt")),
         "net_assets": _int(_text(body, "NetAssetsOrFundBalancesGrp/EOYAmt", "NetAssetsOrFundBalancesEOYAmt")),
         "mgmt_explanation": None if is_ez else _mgmt_explanation(root),
+        "schedule_o_text": _schedule_o_text(root),
         # 990-EZ does not ask whether management was delegated.
         "mgmt_delegated": None if is_ez else parse_bool(_text(body, "DelegationOfMgmtDutiesInd")),
         # The filer's own contact details, used as matching signals. Foreign
@@ -182,7 +199,7 @@ FILING_COLUMNS = (
     "ein", "return_type", "return_version", "tax_period_begin", "tax_period_end",
     "return_ts", "amended", "org_name", "dba_name", "website", "website_host",
     "website_domain", "total_revenue", "mgmt_delegated",
-    "total_expenses", "total_assets", "total_liabilities", "net_assets", "mgmt_explanation",
+    "total_expenses", "total_assets", "total_liabilities", "net_assets", "mgmt_explanation", "schedule_o_text",
     "phone10", "street", "city", "state", "zip5", "name_key", "dba_key",
 )
 PEOPLE_COLUMNS = (

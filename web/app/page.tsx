@@ -11,12 +11,16 @@ async function Summary() {
   // Request-time data: never query the database while building.
   await connection();
   const [row] = await sql<
-    { total: string; verified: string; likely: string; unmatched: string; corrected: string }[]
+    { total: string; verified: string; likely: string; unmatched: string; excluded: string; corrected: string }[]
   >`
     SELECT count(*) AS total,
            count(*) FILTER (WHERE status = 'verified') AS verified,
            count(*) FILTER (WHERE status = 'likely') AS likely,
            count(*) FILTER (WHERE status = 'unmatched') AS unmatched,
+           -- Unmatched because state law puts charters under districts or makes
+           -- them government bodies, so there is usually no nonprofit to find.
+           count(*) FILTER (WHERE status = 'unmatched'
+                            AND reason IN ('district_governed_state', 'public_body_state')) AS excluded,
            count(*) FILTER (WHERE corrected) AS corrected
     FROM school_status`;
   const places = describePlaces(await stateCodes());
@@ -25,6 +29,7 @@ async function Summary() {
     <p className="mt-1 mb-4 text-sm opacity-70">
       {n(row.total)} operating charter schools in {places} · {n(row.verified)} verified ·{" "}
       {n(row.likely)} likely · {n(row.unmatched)} unmatched
+      {Number(row.excluded) > 0 && ` (${n(row.excluded)} in states where charters have no nonprofit by law)`}
       {Number(row.corrected) > 0 && ` · ${n(row.corrected)} corrected by hand`}
     </p>
   );

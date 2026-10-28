@@ -2,8 +2,10 @@ import os
 
 from dagster import AssetSelection, DefaultScheduleStatus, Definitions, EnvVar, ScheduleDefinition, define_asset_job
 
+from .assets.adjudicate import adjudications
 from .assets.bmf import bmf_candidates
 from .assets.ccd import ccd_schools
+from .assets.external import external_links
 from .assets.extract import parsed_filings
 from .assets.irs_index import irs_index
 from .assets.match import school_matches
@@ -38,7 +40,8 @@ monthly_refresh = ScheduleDefinition(
 )
 
 defs = Definitions(
-    assets=[ccd_schools, bmf_candidates, irs_index, zip_members, raw_returns, parsed_filings, school_matches],
+    assets=[ccd_schools, external_links, bmf_candidates, irs_index, zip_members, raw_returns, parsed_filings, school_matches,
+            adjudications],
     asset_checks=[
         operating_school_count,
         known_networks_in_pool,

@@ -302,3 +302,44 @@ def named_in(name: str | None, text: str | None) -> bool:
     ("ACADEMICA DADE LLC" is found in "Academica Dade, LLC, a professional...")."""
     key, haystack = name_key(name), name_key(text)
     return bool(key and haystack and len(key) >= 5 and f" {key} " in f" {haystack} ")
+
+
+_STREET_TYPES = frozenset(
+    """ST STREET AVE AV AVENUE RD ROAD BLVD BOULEVARD DR DRIVE LN LANE PL PLACE CT COURT PKWY PARKWAY
+    HWY HIGHWAY CIR CIRCLE WAY TER TERRACE TRL TRAIL SQ SQUARE PIKE TPKE TURNPIKE EXPY EXPRESSWAY
+    LOOP ROW ALY ALLEY PLZ PLAZA FWY FREEWAY""".split()
+)
+_DIRECTIONS = frozenset("N S E W NE NW SE SW NORTH SOUTH EAST WEST NORTHEAST NORTHWEST SOUTHEAST SOUTHWEST".split())
+_UNIT_WORDS = frozenset("SUITE STE UNIT APT FL FLOOR BLDG BUILDING ROOM RM PO BOX".split())
+
+
+def street_key(street: str | None) -> str | None:
+    """Street number plus street name: "3725 Airport Blvd., Suite 100" -> "3725 AIRPORT".
+
+    Street types, directions and unit numbers are dropped, so "542 7TH AVE W"
+    and "542 West 7th Avenue" agree. Post office boxes have no key.
+    """
+    words = _WORD.findall((street or "").upper())
+    if not words or not words[0][0].isdigit():
+        return None
+    name, directions = [], []
+    for w in words[1:]:
+        if w in _UNIT_WORDS or w in _STREET_TYPES:
+            break
+        (directions if w in _DIRECTIONS else name).append(w)
+    # "108 NORTH STREET": the direction is the name.
+    name = name or directions
+    return f"{words[0]} {' '.join(name)}" if name else None
+
+
+_HOLDER_ID = re.compile(r"\s*\(\d+\)\s*$")
+_DBA = re.compile(r"\s+(?:DBA|D/B/A|D\.B\.A\.)\s+", re.I)
+
+
+def holder_names(name: str | None) -> list[str]:
+    """The legal names in a holder record: "Kaizen Education Foundation dba
+    Vista Grove Prep (1234)" -> ["Kaizen Education Foundation", "Vista Grove Prep"].
+    Drops the state ID that Arizona appends, and splits a DBA."""
+    if not name:
+        return []
+    return [p.strip(" ,") for p in _DBA.split(_HOLDER_ID.sub("", name)) if p.strip(" ,")]

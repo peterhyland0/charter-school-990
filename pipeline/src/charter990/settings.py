@@ -39,3 +39,16 @@ UMBRELLA_LEAIDS = (
     "4700157",  # TN Public Charter School Commission
     "4503919",  # SC Limestone Charters Association
 )
+
+# Evidence about charter holders from outside the IRS data (assets/external.py).
+# Federal Audit Clearinghouse, every single audit since 2016 (public domain).
+FAC_GENERAL_URL = "https://app.fac.gov/dissemination/public-data/gsa/full/general.csv"
+# Texas Education Agency "Charter Holder Information Report", exported to Excel
+# by posting the report viewer's export request back to it.
+TX_CHARTER_HOLDERS_URL = "https://pryor.tea.state.tx.us/Charter/Forms/ReportViewerPublic.aspx?reportid=rpt_sponsor.rpt"
+# Louisiana Department of Education charter contact list (names each school's nonprofit).
+LA_CHARTER_LIST_URL = (
+    "https://doe.louisiana.gov/docs/default-source/school-choice/charter-contact-list.xlsx?sfvrsn=45ce6318_3"
+)
+# These sources publish without ETags we can rely on: re-download after this many days.
+EXTERNAL_MAX_AGE_DAYS = 25

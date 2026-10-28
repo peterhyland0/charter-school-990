@@ -1,6 +1,6 @@
 import pytest
 
-from charter990.assets.extract import parse_return
+from charter990.assets.extract import SCHEDULE_O_MAX_CHARS, parse_return
 from charter990.assets.zips import LABEL
 
 RETURN = """﻿<?xml version="1.0" encoding="utf-8"?>
@@ -109,6 +109,16 @@ def test_finances_contractors_and_management_explanation():
     ]
 
 
+def test_schedule_o_text_keeps_every_entry_capped():
+    filing, _, _ = parse_return(build())
+    assert filing["schedule_o_text"] == (
+        "FORM 990, PART VI, SECTION A, LINE 3: ACADEMICA DADE, LLC PROVIDES PROFESSIONAL SERVICES TO THE SCHOOL."
+        "\n\nFORM 990, PART VI, LINE 13: WHISTLEBLOWER POLICY."
+    )
+    long = build().replace(b"WHISTLEBLOWER POLICY.", b"X" * 20000)
+    assert len(parse_return(long)[0]["schedule_o_text"]) == SCHEDULE_O_MAX_CHARS
+
+
 EZ_RETURN = """<Return xmlns="http://www.irs.gov/efile">
   <ReturnHeader><ReturnTypeCd>990EZ</ReturnTypeCd><TaxPeriodEndDt>2025-06-30</TaxPeriodEndDt>
     <Filer><EIN>987654321</EIN><BusinessName><BusinessNameLine1Txt>SMALL CHARTER</BusinessNameLine1Txt></BusinessName></Filer>
@@ -127,3 +137,4 @@ def test_990ez_finances():
     assert (filing["total_expenses"], filing["total_assets"], filing["total_liabilities"], filing["net_assets"]) == (
         140000, 60000, 10000, 50000)
     assert filing["mgmt_delegated"] is None and filing["mgmt_explanation"] is None and contractors == []
+    assert filing["schedule_o_text"] is None

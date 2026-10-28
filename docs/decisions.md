@@ -1,22 +1,23 @@
 # Design decisions
 
-What was decided, why, and what it costs. Numbers are from the current national run: 8,129 operating charter schools in 44 states, DC, Puerto Rico and Guam. 3,484 are verified, 1,912 likely and 2,733 unmatched.
+What was decided, why, and what it costs. Numbers are from the current national run: 8,129 operating charter schools in 44 states, DC, Puerto Rico and Guam. 4,091 are verified, 1,647 likely and 2,391 unmatched. Before outside evidence was added (below), it was 3,484, 1,912 and 2,733.
 
 ## Data
 
 - **Returns are keyed on the IRS OBJECT_ID**, so an amended return doesn't overwrite its original; "latest" is the newest tax period, then the newest filing.
 - **Each return is located by reading the zips' contents, not the index's batch label,** which is wrong for May (05A returns sit in two zips). Single returns are read with HTTP range requests, about 27,000 instead of the full archive, including May's Deflate64 zips. The 2025 and 2026 indexes are both read.
-- **Candidate nonprofits come from the IRS master file by two routes:**
+- **Candidate nonprofits come from the IRS master file by three routes:**
   - **IRS school codes.**
   - **A network name matching a charter school or district,** such as KIPP or Great Hearts. Big networks often aren't coded as schools.
+  - **Named as a school's holder outside the IRS data** (see "Outside evidence"). This added 131 nonprofits the first two routes missed.
 
-  Support groups like boosters and PTAs are left out, because they share a school's name but don't run it. The result is 57,024 nonprofits and 27,003 parsed returns.
+  Support groups like boosters and PTAs are left out, because they share a school's name but don't run it. The result is 57,155 nonprofits and 27,125 parsed returns.
 
 ## Matching
 
 - **Matching is SQL in Postgres, using trigram similarity.** The rules stay readable, run on the real data, and match the country in about 15 seconds.
-- **Seven signals:** website, name + ZIP, name + city, charter-district name, phone, verified siblings in the same charter district, and a network-site name pick. The name pick is for one website shared by many campus nonprofits, such as Summit Academies' 21. It links the in-state nonprofit whose name clearly matches the school's, and agreed with existing matches 192 times in 196.
-- **Tiers.** "Verified" means two independent signals agree; "likely" means one does. The two district signals count once, so district membership alone never verifies a school.
+- **Nine signals:** website, name + ZIP, name + city, charter-district name, phone, verified siblings in the same charter district, a network-site name pick, a federal audit and a state charter-holder record. The name pick is for one website shared by many campus nonprofits, such as Summit Academies' 21. It links the in-state nonprofit whose name clearly matches the school's, and agreed with existing matches 192 times in 196.
+- **Tiers.** "Verified" means two independent signals agree; "likely" means one does. The two district signals count once, so district membership alone never verifies a school. A federal audit counts once with the name signals, because it is also a name-and-place match.
 - **Names are compared on their distinctive words.** CHARTER, SCHOOL and the like are dropped. Numbers must agree (ICAHN 1 is not ICAHN 4), and a name that is only a city or state counts for nothing.
 - **Exclusions:**
   - Site builders and social media.
@@ -27,14 +28,26 @@ What was decided, why, and what it costs. Numbers are from the current national 
   1. Out of state → affiliate.
   2. Foundation, facilities or lender → support.
   3. Where some delegate management (Form 990 Part VI) and some don't, the ones they delegate to → management organization.
-  4. Direct evidence beats a district-name match.
+  4. Direct evidence beats a district-name match or a federal audit alone. Without this rule the Orlando Science Center, a museum, took Orlando Science Elementary from the nonprofit on the school's website.
   5. A clearly closer name wins.
 
-  What remains runs the school. If that's more than one, the school is shown as ambiguous (285 schools) rather than guessed. *Check:* a first spot check of 20 found 13 right. After fixing three error patterns, a fresh 20 were all right.
+  What remains runs the school. If that's more than one, the school is shown as ambiguous (280 schools) rather than guessed. *Check:* a first spot check of 20 found 13 right. After fixing three error patterns, a fresh 20 were all right.
 - **Every unmatched school gets a reason.** The most specific evidence wins:
   - **The IRS filing code,** for a matching nonprofit with no 990: a 990-N filer, a government body, or no recent return.
   - **The school lists its regular district's website.**
   - **A state where charters are district-run or government bodies by law.** Michigan's public school academies are governmental agencies (MCL 380.501).
+  - **The school's federal audit is filed by a city, county or school district** that files no 990 (10 schools).
+
+## Outside evidence
+
+A 990 never says which charter schools its filer holds, so a school stays unmatched when its holder's name, address and website all differ from the school's. Four public sources name the holder. Each is stored per school in `external_links` and refreshed monthly, and a source that can't be fetched keeps its previous rows.
+
+- **Federal Audit Clearinghouse.** A charter that spends $750k or more of federal money in a year files a single audit naming its EIN and address. An auditee in the school's state is linked when its name matches the school's at the same ZIP or city, or it sits at the same street address. *Check:* on schools already matched, the auditee is the matched operator 87% of the time; most of the rest are a network's filer against a campus's.
+- **Texas Education Agency's charter-holder report** (995 schools) and **Louisiana's charter list** (128): the legal holder of each charter, matched to filers by name.
+- **Arizona's** charter districts are their holders, and NCES already carries the name, with the state's entity ID appended ("Center for Academic Success Inc. (4191)"). It now matches once the ID is removed.
+- **Florida and California publish no holder names,** so most of their unmatched schools remain.
+
+*Result:* unmatched fell from 2,733 to 2,391 and verified rose from 3,484 to 4,091. Against the previous live matches, 342 schools gained a link, none lost one, and 68 changed operator, mostly to the state's holder of record (Pioneer Technology → Meadow Oaks Education Foundation). On the 25-school eval set the matcher went from 17 to 18 right, with no new wrong answers.
 
 ## Management companies and finances
 

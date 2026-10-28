@@ -1,11 +1,14 @@
 """Candidate nonprofits from the IRS Exempt Organizations Business Master File.
 
-Two routes into the pool, both limited to 501(c)(3) organisations:
+Three routes into the pool, both limited to 501(c)(3) organisations:
 - codes: in a state with charter schools, and coded by the IRS as a school
   (FOUNDATION 11) or a charter school (NTEE B29), or named CHARTER.
 - name: coded as education (NTEE B) or not coded at all, and sharing a network
   key with an operating charter school or its district, such as KIPP or
   GREAT HEARTS. Many big networks are coded as neither schools nor charters.
+- external: named as a school's holder outside the IRS data (external_links):
+  by EIN in a federal single audit, or by its exact legal name, in the school's
+  state, in a state charter-holder record.
 
 Support groups (boosters, PTAs, alumni, "Friends of") never enter the pool
 unless the IRS codes them as a school: they share school names and websites
@@ -22,6 +25,7 @@ from ..resources import PostgresResource
 from ..settings import BMF_URLS, RAW_DIR
 from ..util import download_cached, first_two, first_word, is_support_org, name_key, network_key, zip5
 from .ccd import ccd_schools
+from .external import external_links
 
 # A key shared by more than this many 501(c)(3)s nationally is too common to
 # identify a network (for example HOPE or ALLIANCE on their own).
@@ -43,13 +47,19 @@ def _charities(paths: list[Path]):
                     yield path.name, r
 
 
-@asset(group_name="pipeline", deps=[ccd_schools], description="Nonprofits that might run the charter schools.")
+@asset(group_name="pipeline", deps=[ccd_schools, external_links], description="Nonprofits that might run the charter schools.")
 def bmf_candidates(pg: PostgresResource) -> MaterializeResult:
     paths = [download_cached(u, RAW_DIR / "bmf" / u.rsplit("/", 1)[1], refresh=True) for u in BMF_URLS]
 
     with pg.connect() as conn:
         names = conn.execute("SELECT sch_name, lea_name FROM schools WHERE is_operating").fetchall()
         states = {s for (s,) in conn.execute("SELECT DISTINCT st FROM schools WHERE is_operating").fetchall()}
+        external_eins = {e for (e,) in conn.execute(
+            "SELECT DISTINCT ein FROM external_links WHERE ein IS NOT NULL").fetchall()}
+        external_names = set(conn.execute(
+            """SELECT DISTINCT s.st, k FROM external_links x JOIN schools s USING (ncessch),
+                      unnest(x.holder_keys) AS k
+               WHERE x.ein IS NULL""").fetchall())
 
     # Pass 1: how common each opening word and word pair is among all 501(c)(3)s.
     first_counts, two_counts = Counter(), Counter()
@@ -76,13 +86,15 @@ def bmf_candidates(pg: PostgresResource) -> MaterializeResult:
         by_name = (r["NTEE_CD"][:1] in ("B", "")) and (
             network_key(name, first_counts, two_counts, MAX_KEY_FREQUENCY) in school_keys
         )
-        if not (by_codes or by_name):
+        by_external = ein in external_eins or any(
+            (r["STATE"], k) in external_names for k in (name_key(name), name_key(sort_name)) if k)
+        if not (by_codes or by_name or by_external):
             continue
         if not is_school and (is_support_org(name) or is_support_org(sort_name)):
             support_dropped += 1
             continue
         seen.add(ein)
-        route = "codes" if by_codes else "first_word"
+        route = "codes" if by_codes else "first_word" if by_name else "external"
         routes[route] += 1
         rows.append((
             ein, name, sort_name or None, r["CITY"], r["STATE"], r["ZIP"], r["SUBSECTION"],
@@ -97,6 +109,7 @@ def bmf_candidates(pg: PostgresResource) -> MaterializeResult:
         "pool_size": len(rows),
         "route_codes": routes["codes"],
         "route_name": routes["first_word"],
+        "route_external": routes["external"],
         "support_groups_dropped": support_dropped,
         "network_keys": len(school_keys),
         "states_with_charters": len(states),

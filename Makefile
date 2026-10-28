@@ -7,7 +7,7 @@ export DAGSTER_HOME := $(CURDIR)/pipeline/.dagster_home
 # over the environment, which would send NEON=1 corrections to the local database.
 DAGSTER_PORT ?= 3070
 
-.PHONY: db pipeline dagster web test correct unlink no-nonprofit corrections retire neon-load neon-check neon-sync-filings neon-reader neon-roles neon-rematch server-sync
+.PHONY: db pipeline dagster web test adjudicate correct unlink no-nonprofit corrections retire neon-load neon-check neon-sync-filings neon-sync-evidence neon-reader neon-roles neon-rematch server-sync
 
 db:  ## Apply each migration once, in order, to $$DATABASE_URL (creates the local database if needed)
 	@if [ "$(DATABASE_URL)" = "postgresql://localhost/$(DB)" ]; then \
@@ -37,6 +37,17 @@ web:  ## Run the lookup site at localhost:3000
 test:
 	cd pipeline && uv run pytest -q
 
+# The adjudicators. .env.jev (never committed) holds JEV_API_KEY, TypeSafe
+# AI's key for Jev; without it Jev is skipped and only the scored model runs.
+# Decisions are stored, not applied, unless ADJUDICATOR=scored or
+# ADJUDICATOR=jev is set. ADJUDICATOR_MAX_CALLS=n caps Jev calls for a trial.
+JEV_ENV = set -a && . $(CURDIR)/.env.jev && set +a && \
+	if [ -z "$$JEV_API_KEY$$TYPESAFE_API_KEY" ]; then echo "JEV_API_KEY missing: check .env.jev" >&2; exit 1; fi
+
+adjudicate:  ## Decide ambiguous and unmatched schools with the scored model and Jev
+	@mkdir -p $(DAGSTER_HOME) && touch $(DAGSTER_HOME)/dagster.yaml
+	@$(JEV_ENV) && cd pipeline && uv run dagster asset materialize -m charter990.definitions --select adjudications
+
 # Live database. .env.neon (never committed) holds NEON_DATABASE_URL, Neon's
 # direct owner connection string, in double quotes: unquoted, the & in Neon's
 # URLs ends the assignment and the variable comes out empty. Every target
@@ -45,7 +56,7 @@ test:
 NEON_ENV = set -a && . $(CURDIR)/.env.neon && set +a && \
 	case "$$NEON_DATABASE_URL" in *neon.tech*) ;; \
 	  *) echo "NEON_DATABASE_URL missing or not a Neon URL: check .env.neon (quote the value)" >&2; exit 1 ;; esac
-CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people filing_contractors school_matches school_status match_corrections
+CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people filing_contractors school_matches school_status match_corrections external_links adjudications
 
 # The first load only. Once live, the scheduled pipeline keeps Neon current and
 # hand corrections are made there, so a reload would replace them with the
@@ -77,6 +88,18 @@ neon-sync-filings:  ## Apply migrations to Neon, then copy the parsed returns fr
 	  echo "DELETE FROM filing_contractors; DELETE FROM filing_people; DELETE FROM filings;"; \
 	  pg_dump --data-only --no-owner --no-acl $(foreach t,$(SYNC_TABLES),--table=$(t)) "$(DATABASE_URL)"; \
 	) | psql -q -1 -v ON_ERROR_STOP=1 -o /dev/null "$$NEON_DATABASE_URL" && echo "synced: $(SYNC_TABLES)"
+
+# What the matcher and adjudicators read besides the returns: the candidate
+# pool and its index rows, the external holder evidence, and the stored
+# decisions (so Neon's adjudicators don't ask Jev again). Run before
+# neon-rematch. One transaction, like the returns.
+EVIDENCE_TABLES = bmf_orgs irs_index external_links adjudications
+neon-sync-evidence:  ## Apply migrations to Neon, then copy the pool, external evidence and adjudications from local
+	@$(NEON_ENV) && DATABASE_URL="$$NEON_DATABASE_URL" $(MAKE) -s db
+	@$(NEON_ENV) && ( \
+	  $(foreach t,$(EVIDENCE_TABLES),echo "DELETE FROM $(t);";) \
+	  pg_dump --data-only --no-owner --no-acl $(foreach t,$(EVIDENCE_TABLES),--table=$(t)) "$(DATABASE_URL)"; \
+	) | psql -q -1 -v ON_ERROR_STOP=1 -o /dev/null "$$NEON_DATABASE_URL" && echo "synced: $(EVIDENCE_TABLES)"
 
 neon-check:  ## Row counts, local versus Neon
 	@$(NEON_ENV) && for t in $(CHECK_TABLES); do \
