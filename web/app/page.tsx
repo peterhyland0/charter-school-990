@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { connection } from "next/server";
 import { Suspense } from "react";
 import { sql } from "@/lib/db";
 import { STATUS_CLASS, STATUS_LABEL, type Status } from "@/lib/labels";
@@ -22,6 +23,8 @@ function likePattern(q: string): string {
 }
 
 async function Summary() {
+  // Request-time data: never query the database while building.
+  await connection();
   const [row] = await sql<
     { total: string; verified: string; likely: string; unmatched: string; corrected: string; states: string }[]
   >`
@@ -43,6 +46,7 @@ async function Summary() {
 }
 
 async function Search({ searchParams }: { searchParams: PageProps<"/">["searchParams"] }) {
+  await connection();
   const params = await searchParams;
   const q = (typeof params.q === "string" ? params.q : "").trim();
   const st = typeof params.st === "string" ? params.st.trim().toUpperCase() : "";

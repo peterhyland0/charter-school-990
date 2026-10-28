@@ -1,0 +1,17 @@
+# Dagster UI. Listens on localhost only: it has no login, so reach it with
+#   ssh -L 3070:localhost:3070 root@<server>   then open http://localhost:3070
+[Unit]
+Description=charter990 Dagster webserver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=charter990
+WorkingDirectory=/opt/charter990/pipeline
+EnvironmentFile=/etc/charter990.env
+ExecStart=/usr/local/bin/uv run --frozen dagster-webserver -h 127.0.0.1 -p 3070 -m charter990.definitions
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

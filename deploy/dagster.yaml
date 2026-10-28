@@ -1,0 +1,10 @@
+# Dagster instance on the server. Run history stays in SQLite under
+# DAGSTER_HOME (the default), so it costs no Neon storage or compute.
+run_coordinator:
+  module: dagster._core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    # A scheduled run and a manual one never overlap.
+    max_concurrent_runs: 1
+telemetry:
+  enabled: false

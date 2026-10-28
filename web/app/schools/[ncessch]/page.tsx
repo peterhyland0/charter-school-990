@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { connection } from "next/server";
 import { Suspense } from "react";
 import { sql } from "@/lib/db";
 import { day, formatEin, money, propublicaUrl } from "@/lib/format";
@@ -80,6 +81,8 @@ function signalDetail(signal: string, e: Record<string, string | number | null> 
       return `district "${e.district}" vs "${e.filing}" (similarity ${e.similarity})`;
     case "phone":
       return `both list ${String(e.phone).replace(/(\d{3})(\d{3})(\d{4})/, "($1) $2-$3")}`;
+    case "network_site":
+      return `"${e.filing}" is the nonprofit on ${e.domain} whose name matches this school (similarity ${e.similarity})`;
     case "district_group":
       return `${e.verified_schools} other school${e.verified_schools === 1 ? "" : "s"} in ${e.district} verified to this nonprofit`;
     default:
@@ -88,6 +91,7 @@ function signalDetail(signal: string, e: Record<string, string | number | null> 
 }
 
 async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]">["params"] }) {
+  await connection();
   const { ncessch } = await params;
   const [school] = await sql<School[]>`SELECT * FROM schools WHERE ncessch = ${ncessch}`;
   if (!school) notFound();

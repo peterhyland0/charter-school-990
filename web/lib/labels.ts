@@ -19,6 +19,7 @@ export const SIGNAL_LABEL: Record<string, string> = {
   district_name: "Charter district name",
   phone: "Phone",
   district_group: "Same charter district",
+  network_site: "Network website and name",
 };
 
 export type Role = "operator" | "management" | "support" | "affiliate" | "related" | "other";
@@ -53,6 +54,10 @@ export function reasonText(reason: string | null, detail: Detail): string {
       return `A nonprofit with a matching name and ZIP, ${nonprofit}, is registered with the IRS but isn't required to file a Form 990, for example because it is a government body.`;
     case "no_recent_return":
       return `A nonprofit with a matching name and ZIP, ${nonprofit}, normally files a Form 990, but none was published in 2025 or 2026. Its return may be late or not yet released.`;
+    case "public_body_state":
+      return "Charter schools in Michigan are government bodies under state law (MCL 380.501), not nonprofits, so most have no Form 990 to find.";
+    case "uses_district_website":
+      return "This school lists its school district's website, so it is probably run by the district and has no separate nonprofit.";
     case "inside_regular_district":
       return "This school is listed under a regular school district rather than its own charter district, and no nonprofit matched it. It may be run by the district.";
     default:

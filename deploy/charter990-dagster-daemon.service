@@ -1,0 +1,16 @@
+# Dagster daemon: fires the monthly schedule and launches queued runs.
+[Unit]
+Description=charter990 Dagster daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=charter990
+WorkingDirectory=/opt/charter990/pipeline
+EnvironmentFile=/etc/charter990.env
+ExecStart=/usr/local/bin/uv run --frozen dagster-daemon run -m charter990.definitions
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

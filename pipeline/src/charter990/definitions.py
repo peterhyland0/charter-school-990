@@ -1,4 +1,6 @@
-from dagster import Definitions, EnvVar
+import os
+
+from dagster import AssetSelection, DefaultScheduleStatus, Definitions, EnvVar, ScheduleDefinition, define_asset_job
 
 from .assets.bmf import bmf_candidates
 from .assets.ccd import ccd_schools
@@ -20,6 +22,20 @@ from .checks import (
 )
 from .resources import PostgresResource
 
+# The IRS posts each month's e-file zips during the following month, so run on
+# the 3rd. Only switched on where CHARTER990_SCHEDULE=on (the server), so a
+# local `make dagster` never fires it.
+refresh = define_asset_job("refresh", selection=AssetSelection.all())
+monthly_refresh = ScheduleDefinition(
+    name="monthly_refresh",
+    job=refresh,
+    cron_schedule="0 6 3 * *",
+    execution_timezone="UTC",
+    default_status=(
+        DefaultScheduleStatus.RUNNING if os.environ.get("CHARTER990_SCHEDULE") == "on" else DefaultScheduleStatus.STOPPED
+    ),
+)
+
 defs = Definitions(
     assets=[ccd_schools, bmf_candidates, irs_index, zip_members, raw_returns, parsed_filings, school_matches],
     asset_checks=[
@@ -33,5 +49,7 @@ defs = Definitions(
         known_roles,
         umbrella_watch,
     ],
+    jobs=[refresh],
+    schedules=[monthly_refresh],
     resources={"pg": PostgresResource(dsn=EnvVar("DATABASE_URL"))},
 )

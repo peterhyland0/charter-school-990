@@ -28,6 +28,23 @@ make web       # lookup site at http://localhost:3000
 pipeline's unit tests. `STATE_FILTER=NY make pipeline` runs a single state, which is
 much faster.
 
+## Deploying
+
+The same code runs live; only `DATABASE_URL` changes.
+
+- **Database:** Neon, Postgres 17, AWS US East. Loaded once from a local run with
+  `make neon-load`, then kept current by the scheduled pipeline.
+- **Website:** Vercel, deployed from this repo with Root Directory `web`.
+  `DATABASE_URL` is Neon's pooled connection string for a read-only `web_reader` role
+  (`make neon-roles`). Every push to `main` redeploys.
+- **Pipeline:** Dagster on a small Ubuntu server (`deploy/setup.sh`): a webserver
+  bound to localhost and a daemon that runs `monthly_refresh` at 06:00 UTC on the 3rd.
+  The schedule is on only where `CHARTER990_SCHEDULE=on`. Reach the UI with
+  `ssh -L 3070:localhost:3070 root@<server>`.
+
+Copy `.env.neon.example` to `.env.neon` for the `neon-*` targets. Add `NEON=1` to a
+correction command to fix a match in the live database.
+
 ## Fixing a match
 
 A correction is stored in Postgres and applied last on every run, so it always wins

@@ -7,6 +7,9 @@ Five signals are computed in SQL for every school and candidate nonprofit:
 - district_name: the school's charter district is named like the nonprofit
   (in many states the charter district is the legal nonprofit)
 - phone: the same 10-digit phone number
+- network_site: where a website can't identify one nonprofit (an umbrella site
+  shared by many campus nonprofits, or the same site name on another ending),
+  the in-state nonprofit on it whose name clearly matches the school's
 
 A sixth, district_group, spreads a verified link across a charter district:
 the district is one legal nonprofit, so its schools share it.
@@ -42,8 +45,20 @@ SHARED_PHONE_FILERS = 5
 # States whose charter schools are governed by school districts by law, so
 # most have no separate nonprofit (NEPC; CCD shows no charter districts there).
 DISTRICT_GOVERNED_STATES = ["AK", "KS", "MD", "VA"]
+# States whose charter schools are government bodies by statute, not
+# nonprofits, so most have no Form 990: Michigan's public school academies are
+# bodies corporate with governmental-agency status (MCL 380.501). Wisconsin
+# was checked and left out: each district decides per school (Wis. Stat.
+# 118.40(7)). New Mexico was left out for lack of a primary source.
+PUBLIC_BODY_STATES = ["MI"]
 # A tied nonprofit whose name is this much closer to the school's name wins.
 NAME_TIE_MARGIN = 0.1
+# network_site: the best-named nonprofit on a shared site needs at least this
+# similarity to the school's name, and must lead the next by NAME_TIE_MARGIN.
+NETWORK_SITE_SIMILARITY = 0.6
+# Site names shorter than this (e.g. "kipp") match too many unrelated domains
+# when compared across endings.
+MIN_SITE_STEM = 6
 # Entities that belong to a network but don't run its schools.
 SUPPORT_NAME = r"\m(FOUNDATION|FACILITY|FACILITIES|HOLDING|HOLDINGS|LENDER|REAL ESTATE|PROPERTY|PROPERTIES|BUILDING)\M"
 
@@ -104,6 +119,43 @@ SIGNALS = {
         WHERE NOT (s.website_domain = ANY(%(excluded)s))
           AND s.website_domain NOT IN (SELECT website_domain FROM umbrella)
           AND s.website_domain NOT IN (SELECT domain FROM district_domains)
+    """,
+    # Summit Academies lists one site on 21 campus nonprofits, which is too many
+    # for the website signal, and some schools list summitacademies.org where
+    # the returns say .com. Rank every in-state nonprofit on the same site or
+    # same site name by how closely its name matches the school's; link the
+    # winner only if it clearly leads and the website signal didn't already
+    # link it. Measured on schools that already match: it picks the current
+    # operator 192 times in 196.
+    "network_site": """
+        WITH umbrella AS (
+            SELECT website_domain FROM lf WHERE website_domain IS NOT NULL
+            GROUP BY 1 HAVING count(*) > %(umbrella_filers)s
+        ),
+        site AS (
+            SELECT s.ncessch, s.website AS school_site, s.website_domain AS school_domain, f.ein, f.object_id,
+                   f.org_name, f.website_domain AS filer_domain, similarity(s.name_key, f.name_key) AS sim
+            FROM ops s JOIN lf f ON f.state = s.st
+             AND (f.website_domain = s.website_domain
+                  OR (split_part(f.website_domain, '.', 1) = split_part(s.website_domain, '.', 1)
+                      AND length(split_part(s.website_domain, '.', 1)) >= %(min_stem)s))
+            WHERE NOT (s.website_domain = ANY(%(excluded)s)) AND NOT (f.website_domain = ANY(%(excluded)s))
+              AND s.website_domain NOT IN (SELECT domain FROM district_domains)
+        ),
+        ranked AS (
+            SELECT site.*, count(*) OVER (PARTITION BY ncessch) AS n, row_number() OVER w AS pos,
+                   lead(sim) OVER w AS runner_up
+            FROM site WINDOW w AS (PARTITION BY ncessch ORDER BY sim DESC, ein)
+        )
+        INSERT INTO cand
+        SELECT ncessch, ein, object_id, 'network_site',
+               jsonb_build_object('school', school_site, 'filing', org_name, 'domain', filer_domain,
+                                  'similarity', round(sim::numeric, 2))
+        FROM ranked
+        WHERE pos = 1 AND n >= 2 AND sim >= %(site_sim)s
+          AND (runner_up IS NULL OR sim - runner_up >= %(name_margin)s)
+          -- Only where the website signal couldn't link this nonprofit.
+          AND (filer_domain <> school_domain OR school_domain IN (SELECT website_domain FROM umbrella))
     """,
     "name_zip": f"""
         INSERT INTO cand
@@ -319,11 +371,15 @@ BUILD_STATUS = """
                WHEN m.best IS NOT NULL THEN NULL
                WHEN c.ncessch IS NOT NULL THEN 'corrected_none'
                WHEN s.st = ANY(%(district_states)s) THEN 'district_governed_state'
+               WHEN s.st = ANY(%(public_body_states)s) THEN 'public_body_state'
                -- The IRS filing requirement code says why a registered
                -- nonprofit has no 990 or 990-EZ on file.
                WHEN pf.filing_req_cd = '02' THEN 'postcard_filer'
                WHEN pf.filing_req_cd IN ('00', '06', '07', '13', '14') THEN 'not_required_to_file'
                WHEN pf.ein IS NOT NULL THEN 'no_recent_return'
+               -- The school's own site is its regular district's: probably
+               -- run by the district, with no separate nonprofit.
+               WHEN s.website_domain IN (SELECT domain FROM district_domains) THEN 'uses_district_website'
                WHEN s.lea_type IS DISTINCT FROM '7' THEN 'inside_regular_district'
                ELSE 'no_candidate_found'
            END,
@@ -366,9 +422,12 @@ PARAMS = {
     "city_sim": NAME_CITY_SIMILARITY,
     "district_sim": DISTRICT_NAME_SIMILARITY,
     "district_states": DISTRICT_GOVERNED_STATES,
+    "public_body_states": PUBLIC_BODY_STATES,
     "support_name": SUPPORT_NAME,
     "name_margin": NAME_TIE_MARGIN,
     "indirect": ["district_name", "district_group"],
+    "site_sim": NETWORK_SITE_SIMILARITY,
+    "min_stem": MIN_SITE_STEM,
 }
 
 
