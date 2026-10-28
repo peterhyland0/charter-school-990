@@ -12,6 +12,8 @@ nonprofits linked to a school, ordered rules decide which one runs it and which 
 management organization, a support entity or the same network in another state. Hand
 corrections override the matcher and survive every rerun. Running locally.
 
+Why it is built this way: [docs/decisions.md](docs/decisions.md).
+
 ## Run it locally
 
 Needs Postgres 17 on localhost, [uv](https://docs.astral.sh/uv/) and Node 20+.
