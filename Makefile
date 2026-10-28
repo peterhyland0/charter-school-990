@@ -4,7 +4,7 @@ export DATABASE_URL ?= postgresql://localhost/$(DB)
 export DAGSTER_HOME := $(CURDIR)/pipeline/.dagster_home
 DAGSTER_PORT ?= 3070
 
-.PHONY: db pipeline dagster web test correct unlink no-nonprofit corrections retire neon-load neon-check neon-roles neon-rematch server-sync
+.PHONY: db pipeline dagster web test correct unlink no-nonprofit corrections retire neon-load neon-check neon-reader neon-roles neon-rematch server-sync
 
 db:  ## Apply each migration once, in order, to $$DATABASE_URL (creates the local database if needed)
 	@if [ "$(DATABASE_URL)" = "postgresql://localhost/$(DB)" ]; then \
@@ -50,7 +50,16 @@ neon-check:  ## Row counts, local versus Neon
 	    "$$(psql -qAt "$$NEON_DATABASE_URL" -c "SELECT count(*) FROM $$t")"; \
 	done
 
-neon-roles:  ## Give the web_reader role read-only access (create the role in the Neon console first)
+# Create web_reader in SQL, not in the Neon console or CLI: Neon makes those
+# roles members of neon_superuser, which can write every table.
+neon-reader:  ## Create the read-only web_reader role; prints its pooled URL for Vercel
+	@$(NEON_ENV) && PW=$$(openssl rand -hex 24) && \
+	  psql -q -v ON_ERROR_STOP=1 "$$NEON_DATABASE_URL" -c "CREATE ROLE web_reader LOGIN PASSWORD '$$PW'" && \
+	  psql -q -v ON_ERROR_STOP=1 "$$NEON_DATABASE_URL" -f db/roles/web_reader.sql && \
+	  echo "DATABASE_URL for Vercel (pooled, read-only):" && \
+	  echo "$$NEON_DATABASE_URL" | sed -E "s#//[^@]+@([^.]+)#//web_reader:$$PW@\1-pooler#"
+
+neon-roles:  ## Re-apply web_reader's read-only grants
 	@$(NEON_ENV) && psql -q -v ON_ERROR_STOP=1 "$$NEON_DATABASE_URL" -f db/roles/web_reader.sql && echo "web_reader can read"
 
 neon-rematch:  ## Rebuild only the matches in Neon from this Mac
