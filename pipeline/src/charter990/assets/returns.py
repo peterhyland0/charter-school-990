@@ -9,11 +9,13 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 import inflate64
+import requests
 from dagster import MaterializeResult, asset
 from remotezip import RemoteZip
 
 from ..resources import PostgresResource
 from ..settings import HTTP_HEADERS, RAW_DIR
+from .zips import STAGE as ZIPS_STAGE
 from .zips import zip_members
 
 XML_DIR = RAW_DIR / "xml"
@@ -24,6 +26,8 @@ TIMEOUT = (15, 60)
 PERMANENT_ERRORS = (NotImplementedError, zipfile.BadZipFile, KeyError)
 # Big zips are split so one worker isn't left reading thousands of returns alone.
 CHUNK_SIZE = 500
+# Extra bytes requested past a member in case its local header is longer.
+LOCAL_EXTRA_SLACK = 1024
 # Kept modest: the IRS host blocks clients that send too many requests at once.
 MAX_WORKERS = 4
 
@@ -45,20 +49,34 @@ def xml_path(object_id: str):
     return XML_DIR / f"{object_id}.xml"
 
 
-def read_member(zf: RemoteZip, name: str) -> bytes:
-    """Read one member, including Deflate64 ones.
+def _range(session: requests.Session, url: str, start: int, length: int) -> bytes:
+    resp = session.get(url, headers={**HTTP_HEADERS, "Range": f"bytes={start}-{start + length - 1}"},
+                       timeout=TIMEOUT, stream=True)
+    with resp:
+        resp.raise_for_status()
+        # A server that ignores Range would send the whole zip; refuse instead.
+        if resp.status_code != 206:
+            raise zipfile.BadZipFile(f"range request not honoured (HTTP {resp.status_code})")
+        return resp.content
+
+
+def read_member(session: requests.Session, url: str, info: zipfile.ZipInfo) -> bytes:
+    """Read one member with a single range request, including Deflate64 ones.
 
     The IRS builds its large May zips with Deflate64 (method 9), which Python's
     zipfile can't decompress. So read the member's raw bytes and decompress here.
     """
-    info = zf.getinfo(name)
-    zf.fp.seek(info.header_offset)
-    header = zf.fp.read(30)
-    if header[:4] != b"PK\x03\x04":
-        raise zipfile.BadZipFile(f"bad local header for {name}")
-    name_len, extra_len = struct.unpack("<HH", header[26:30])
-    zf.fp.seek(info.header_offset + 30 + name_len + extra_len)
-    raw = zf.fp.read(info.compress_size)
+    # The local header's extra field can differ from the central directory's,
+    # so ask for some slack and fetch the rest only if that wasn't enough.
+    head = 30 + len(info.filename.encode()) + len(info.extra)
+    blob = _range(session, url, info.header_offset, head + info.compress_size + LOCAL_EXTRA_SLACK)
+    if blob[:4] != b"PK\x03\x04":
+        raise zipfile.BadZipFile(f"bad local header for {info.filename}")
+    name_len, extra_len = struct.unpack("<HH", blob[26:30])
+    data_start = 30 + name_len + extra_len
+    if len(blob) < data_start + info.compress_size:
+        blob += _range(session, url, info.header_offset + len(blob), data_start + info.compress_size - len(blob))
+    raw = blob[data_start:data_start + info.compress_size]
     if info.compress_type == zipfile.ZIP_DEFLATED:
         data = zlib.decompress(raw, -15)
     elif info.compress_type == 9:  # Deflate64
@@ -68,23 +86,32 @@ def read_member(zf: RemoteZip, name: str) -> bytes:
     else:
         raise NotImplementedError(f"compression method {info.compress_type}")
     if zlib.crc32(data) != info.CRC:
-        raise zipfile.BadZipFile(f"CRC mismatch for {name}")
+        raise zipfile.BadZipFile(f"CRC mismatch for {info.filename}")
     return data
 
 
-def _fetch_zip(zip_url: str, object_ids: list[str]) -> tuple[int, list[tuple[str, str]]]:
+def _directory(zip_url: str, object_ids: list[str]) -> tuple[dict[str, zipfile.ZipInfo], list[tuple[str, str]]]:
+    """Read a zip's table of contents once and pick out the wanted members.
+
+    Never raises: failures are returned."""
+    try:
+        with RemoteZip(zip_url, headers=HTTP_HEADERS, timeout=TIMEOUT) as zf:
+            infos = {n.split("_", 1)[0]: zf.getinfo(n) for n in zf.namelist() if n.endswith("_public.xml")}
+    except Exception as exc:
+        return {}, [(object_id, f"could not open {zip_url}: {exc!r}") for object_id in object_ids]
+    found = {o: infos[o] for o in object_ids if o in infos}
+    missing = [(o, f"not in {zip_url}") for o in object_ids if o not in infos]
+    return found, missing
+
+
+def _fetch_chunk(zip_url: str, infos: list[tuple[str, zipfile.ZipInfo]]) -> tuple[int, list[tuple[str, str]]]:
     """Fetch the given returns from one zip. Never raises: failures are returned."""
     fetched, errors = 0, []
-    try:
-        zf = RemoteZip(zip_url, headers=HTTP_HEADERS, timeout=TIMEOUT)
-    except Exception as exc:  # the zip's table of contents couldn't be read
-        return 0, [(object_id, f"could not open {zip_url}: {exc!r}") for object_id in object_ids]
-    with zf:
-        for object_id in object_ids:
-            member = f"{object_id}_public.xml"
+    with requests.Session() as session:
+        for object_id, info in infos:
             for attempt in range(3):
                 try:
-                    data = read_member(zf, member)
+                    data = read_member(session, zip_url, info)
                     tmp = xml_path(object_id).with_suffix(".tmp")
                     tmp.write_bytes(data)
                     tmp.replace(xml_path(object_id))
@@ -106,22 +133,32 @@ def raw_returns(pg: PostgresResource) -> MaterializeResult:
     XML_DIR.mkdir(parents=True, exist_ok=True)
     with pg.connect() as conn:
         selected = conn.execute(SELECT_LATEST).fetchall()
+        unreachable = [z for (z,) in conn.execute(
+            "SELECT key FROM load_errors WHERE stage = %s ORDER BY key", (ZIPS_STAGE,)
+        ).fetchall()]
+    # A return is only truly missing if every zip it could be in was readable.
+    unlocated = (
+        f"not located: these zips were unreachable this run: {', '.join(unreachable)}"
+        if unreachable else "listed in the IRS index but not found in any zip"
+    )
 
     todo, errors = defaultdict(list), []
     for object_id, _, zip_url in selected:
         if zip_url is None:
-            errors.append((object_id, "listed in the IRS index but not found in any zip"))
+            errors.append((object_id, unlocated))
         elif not xml_path(object_id).exists():
             todo[zip_url].append(object_id)
 
-    chunks = [
-        (zip_url, ids[i:i + CHUNK_SIZE])
-        for zip_url, ids in todo.items()
-        for i in range(0, len(ids), CHUNK_SIZE)
-    ]
     fetched = 0
-    with ThreadPoolExecutor(max_workers=max(1, min(MAX_WORKERS, len(chunks)))) as pool:
-        for n, errs in pool.map(lambda chunk: _fetch_zip(*chunk), chunks):
+    with ThreadPoolExecutor(max_workers=max(1, min(MAX_WORKERS, len(todo)))) as pool:
+        # One table-of-contents read per zip, then the members in parallel chunks.
+        directories = list(pool.map(lambda item: _directory(*item), todo.items()))
+        chunks = []
+        for zip_url, (infos, errs) in zip(todo, directories):
+            errors.extend(errs)
+            items = sorted(infos.items(), key=lambda item: item[1].header_offset)
+            chunks += [(zip_url, items[i:i + CHUNK_SIZE]) for i in range(0, len(items), CHUNK_SIZE)]
+        for n, errs in pool.map(lambda chunk: _fetch_chunk(*chunk), chunks):
             fetched += n
             errors.extend(errs)
 

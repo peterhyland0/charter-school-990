@@ -73,7 +73,9 @@ def parse_bool(value: str | None) -> bool | None:
 
 
 # Responses that mean "try again later" rather than "this doesn't exist".
-RETRYABLE_STATUS = {403, 429, 500, 502, 503, 504}
+# Not 403: when the IRS host blocks a client it stays blocked for far longer
+# than a retry waits, so retrying only stalls the run.
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 class SourceUnavailable(Exception):
@@ -150,13 +152,17 @@ def decode_text(data: bytes) -> str:
 
 _WORD = re.compile(r"[A-Z0-9]+")
 
-# Words that open many unrelated names, so they can't identify a network.
-NAME_STOPWORDS = frozenset(
-    """THE NEW YORK CITY CHARTER CHARTERS SCHOOL SCHOOLS ACADEMY ACADEMIES PUBLIC
-    HIGH PREP PREPARATORY COMMUNITY INTERNATIONAL OF FOR AND AT IN CS INC
-    ELEMENTARY MIDDLE LEARNING CENTER CENTRE EDUCATION EDUCATIONAL FOUNDATION
-    FRIENDS""".split()
+# Generic school words. The matcher compares names with these removed (the SQL
+# name_core function takes this list as an argument), so "LAMAD ACADEMY CHARTER
+# SCHOOL" is compared on LAMAD.
+GENERIC_WORDS = tuple(
+    """CHARTER CHARTERS SCHOOL SCHOOLS ACADEMY ACADEMIES PUBLIC PREPARATORY PREP
+    COLLEGE HIGH MIDDLE ELEMENTARY COMMUNITY LEARNING CENTER CENTRE EDUCATION
+    EDUCATIONAL FOUNDATION INTERNATIONAL OF FOR AND AT IN CS PCS""".split()
 )
+
+# Words that open many unrelated names, so they can't identify a network.
+NAME_STOPWORDS = frozenset(GENERIC_WORDS) | {"THE", "NEW", "YORK", "CITY", "INC", "FRIENDS"}
 
 
 def first_word(name: str | None) -> str | None:

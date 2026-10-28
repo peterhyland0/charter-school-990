@@ -36,11 +36,14 @@ def ccd_schools(pg: PostgresResource) -> MaterializeResult:
     _, leas = _read_csv(CCD_LEA_URL)
     lea_type = {r["LEAID"]: r["LEA_TYPE"] for r in leas}
     # Websites of districts that aren't charter districts (LEA_TYPE 7) or
-    # "other" agencies (8), which sometimes are charter operators.
-    district_domains = sorted({
-        d for r in leas
-        if r["LEA_TYPE"] not in ("7", "8") and (d := normalize_site(r.get("WEBSITE"))[1])
-    })
+    # "other" agencies (8), which sometimes are charter operators. A domain that
+    # a charter district or agency also lists belongs to the charter, not to a
+    # regular district, so it stays usable.
+    domains_by_kind = {True: set(), False: set()}
+    for r in leas:
+        if d := normalize_site(r.get("WEBSITE"))[1]:
+            domains_by_kind[r["LEA_TYPE"] in ("7", "8")].add(d)
+    district_domains = sorted(domains_by_kind[False] - domains_by_kind[True])
 
     rows, operating, with_domain, in_charter_lea = [], 0, 0, 0
     for r in schools:

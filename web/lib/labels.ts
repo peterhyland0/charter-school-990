@@ -20,14 +20,19 @@ export const SIGNAL_LABEL: Record<string, string> = {
   phone: "Phone",
 };
 
-type Detail = { has_website?: boolean; postcard_ein?: string; postcard_name?: string };
+type Detail = { has_website?: boolean; nonprofit_ein?: string; nonprofit_name?: string; filing_req_cd?: string };
 
 export function reasonText(reason: string | null, detail: Detail): string {
+  const nonprofit = detail.nonprofit_name ?? "a nonprofit";
   switch (reason) {
     case "district_governed_state":
       return "Charter schools in this state are governed by school districts, so there is usually no separate nonprofit to find.";
-    case "filer_without_efile":
-      return `A nonprofit with a matching name and ZIP, ${detail.postcard_name ?? "unnamed"}, is registered with the IRS but filed no Form 990 or 990-EZ in 2025 or 2026. It most likely files only the 990-N postcard, which has no financial detail.`;
+    case "postcard_filer":
+      return `A nonprofit with a matching name and ZIP, ${nonprofit}, is registered with the IRS as a small organization that files only the 990-N postcard, which has no financial detail.`;
+    case "not_required_to_file":
+      return `A nonprofit with a matching name and ZIP, ${nonprofit}, is registered with the IRS but isn't required to file a Form 990, for example because it is a government body.`;
+    case "no_recent_return":
+      return `A nonprofit with a matching name and ZIP, ${nonprofit}, normally files a Form 990, but none was published in 2025 or 2026. Its return may be late or not yet released.`;
     case "inside_regular_district":
       return "This school is listed under a regular school district rather than its own charter district, and no nonprofit matched it. It may be run by the district.";
     default:

@@ -9,6 +9,7 @@ import json
 import re
 from concurrent.futures import ThreadPoolExecutor
 
+import requests
 from dagster import MaterializeResult, asset
 from remotezip import RemoteZip
 
@@ -18,6 +19,9 @@ from ..util import SourceUnavailable, head_with_retry
 from .irs_index import irs_index
 
 SUFFIXES = "ABCD"
+STAGE = "zips"
+# Probe result for a zip that may exist but couldn't be checked this run.
+UNREACHABLE = "unreachable"
 LABEL = re.compile(r"^(\d{4})_TEOS_XML_(\d{2})[A-Z]$")
 
 
@@ -35,22 +39,22 @@ def _probe(name: str) -> tuple[str, str | None]:
     """Return (name, ETag) if the zip exists, else (name, None).
 
     When the IRS server refuses or fails, fall back to the cached listing so a
-    temporary outage doesn't stop the run; a zip never seen before is skipped.
+    temporary outage doesn't stop the run. A zip with no cached listing is
+    reported as UNREACHABLE rather than treated as absent.
     """
     try:
         resp = head_with_retry(_zip_url(name))
-    except SourceUnavailable:
-        return name, _cached_listing(name)
+    except (SourceUnavailable, requests.RequestException):
+        return name, _cached_listing(name) or UNREACHABLE
     if resp.status_code == 404:
         return name, None
-    return name, resp.headers.get("ETag", "").strip('"') or "no-etag"
+    # Kept to safe filename characters: the ETag names the cached listing file.
+    return name, re.sub(r"[^A-Za-z0-9]", "", resp.headers.get("ETag", "")) or "noetag"
 
 
 def _members(name: str, etag: str) -> list[str]:
     """Object ids in a zip, from a cached copy of its table of contents."""
-    cache = RAW_DIR / "zipdirs" / f"{name}.{re.sub(r'[^A-Za-z0-9]', '', etag)}.json"
-    if not cache.exists() and (RAW_DIR / "zipdirs" / f"{name}.{etag}.json").exists():
-        cache = RAW_DIR / "zipdirs" / f"{name}.{etag}.json"  # an already-sanitised cached ETag
+    cache = RAW_DIR / "zipdirs" / f"{name}.{etag}.json"
     if cache.exists():
         return json.loads(cache.read_text())
     with RemoteZip(_zip_url(name), headers=HTTP_HEADERS, timeout=(15, 120)) as zf:
@@ -72,7 +76,9 @@ def zip_members(pg: PostgresResource) -> MaterializeResult:
     candidates = [f"{y}_TEOS_XML_{mm}{s}.zip" for y, mm in sorted(months) for s in SUFFIXES]
     # Few parallel requests: the IRS host rate-limits bursts.
     with ThreadPoolExecutor(max_workers=3) as pool:
-        zips = {name: etag for name, etag in pool.map(_probe, candidates) if etag is not None}
+        probed = dict(pool.map(_probe, candidates))
+        unreachable = sorted(n for n, etag in probed.items() if etag == UNREACHABLE)
+        zips = {n: etag for n, etag in probed.items() if etag not in (None, UNREACHABLE)}
         listings = dict(zip(zips, pool.map(lambda item: _members(*item), zips.items())))
 
     rows = [
@@ -83,10 +89,15 @@ def zip_members(pg: PostgresResource) -> MaterializeResult:
     ]
     with pg.connect() as conn:
         pg.replace_table(conn, "zip_members", ("object_id", "zip_name", "zip_url", "zip_etag"), rows)
+        # raw_returns reads these to explain returns it couldn't locate.
+        conn.execute("DELETE FROM load_errors WHERE stage = %s", (STAGE,))
+        for name in unreachable:
+            pg.log_error(conn, STAGE, name, "IRS server unreachable and no cached listing")
 
     located = {r[0] for r in rows}
     return MaterializeResult(metadata={
         "zips_found": ", ".join(sorted(zips)),
+        "zips_unreachable": ", ".join(unreachable) or "none",
         "unrecognised_labels": ", ".join(unrecognised) or "none",
         "wanted_returns": len(wanted),
         "located": len(located),
