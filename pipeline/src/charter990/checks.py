@@ -4,7 +4,7 @@ from dagster import AssetCheckResult, AssetCheckSeverity, asset_check
 
 from .assets.bmf import bmf_candidates
 from .assets.ccd import ccd_schools
-from .assets.returns import raw_returns
+from .assets.returns import SELECT_LATEST, raw_returns
 from .assets.zips import zip_members
 from .resources import PostgresResource
 
@@ -52,10 +52,10 @@ def success_return_located(pg: PostgresResource) -> AssetCheckResult:
     return AssetCheckResult(passed=zip_name == "2026_TEOS_XML_05B.zip", metadata={"zip": zip_name or "not found"})
 
 
-@asset_check(asset=raw_returns, description="Fewer than 5% of fetches failed.")
+@asset_check(asset=raw_returns, description="At most 5% of selected returns failed to fetch or weren't in any zip.")
 def fetch_failure_rate(pg: PostgresResource) -> AssetCheckResult:
     with pg.connect() as conn:
         (failed,) = conn.execute("SELECT count(*) FROM load_errors WHERE stage = 'fetch'").fetchone()
-        (total,) = conn.execute("SELECT count(*) FROM zip_members").fetchone()
+        (total,) = conn.execute(f"SELECT count(*) FROM ({SELECT_LATEST}) s").fetchone()
     rate = failed / total if total else 0.0
-    return AssetCheckResult(passed=rate <= MAX_FAILURE_RATE, metadata={"failed": failed, "rate": round(rate, 4)})
+    return AssetCheckResult(passed=rate <= MAX_FAILURE_RATE, metadata={"failed": failed, "selected": total, "rate": round(rate, 4)})

@@ -24,35 +24,34 @@ def _status(value: str) -> int | None:
 
 @asset(group_name="phase0", description="Charter schools in the phase 0 state, all statuses.")
 def ccd_schools(pg: PostgresResource) -> MaterializeResult:
-    zip_path = download_cached(CCD_SCHOOL_URL, RAW_DIR / "ccd" / CCD_SCHOOL_URL.rsplit("/", 1)[1])
+    zip_path = download_cached(CCD_SCHOOL_URL, RAW_DIR / "ccd" / CCD_SCHOOL_URL.rsplit("/", 1)[1], refresh=True)
     with zipfile.ZipFile(zip_path) as zf:
         csv_name = next(n for n in zf.namelist() if n.lower().endswith(".csv"))
         text = decode_text(zf.read(csv_name))
 
-    rows = []
+    rows, operating, operating_with_domain = [], 0, 0
     for r in csv.DictReader(io.StringIO(text)):
         if r["ST"] != STATE or r["CHARTER_TEXT"] != "Yes":
             continue
         status = _status(r["UPDATED_STATUS"])
         host, domain = normalize_site(r["WEBSITE"])
+        is_operating = status in OPERATING_STATUSES
+        operating += is_operating
+        operating_with_domain += is_operating and domain is not None
         rows.append((
             r["NCESSCH"], r["SCHID"], r["LEAID"], r["LEA_NAME"], r["ST_SCHID"],
             r["SCH_NAME"], r["ST"], r["LSTREET1"], r["LCITY"], r["LZIP"], r["PHONE"],
             r["WEBSITE"] or None, host, domain, r["CHARTAUTHN1"] or None, status,
-            status in OPERATING_STATUSES, csv_name,
+            is_operating, csv_name,
         ))
 
-    with pg.connect() as conn, conn.cursor() as cur:
+    with pg.connect() as conn:
         # Matches reference schools and are rebuilt downstream on every run.
-        cur.execute("TRUNCATE schools CASCADE")
-        with cur.copy(f"COPY schools ({', '.join(COLUMNS)}) FROM STDIN") as copy:
-            for row in rows:
-                copy.write_row(row)
+        pg.replace_table(conn, "schools", COLUMNS, rows, cascade=True)
 
-    operating = [r for r in rows if r[16]]
     return MaterializeResult(metadata={
         "source_file": csv_name,
         "charter_rows": len(rows),
-        "operating": len(operating),
-        "operating_with_domain": sum(1 for r in operating if r[13]),
+        "operating": operating,
+        "operating_with_domain": operating_with_domain,
     })

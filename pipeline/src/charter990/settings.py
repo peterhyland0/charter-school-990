@@ -3,7 +3,9 @@
 from pathlib import Path
 
 STATE = "NY"
-INDEX_YEAR = 2026
+# Read the previous year's index too: a nonprofit's newest return can sit there
+# while the current year's index only holds a late filing for an older year.
+INDEX_YEARS = (2025, 2026)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RAW_DIR = REPO_ROOT / "data" / "raw"

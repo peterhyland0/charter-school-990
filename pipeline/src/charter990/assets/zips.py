@@ -7,29 +7,31 @@ where every wanted return actually sits.
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from dagster import MaterializeResult, asset
 from remotezip import RemoteZip
 
 from ..resources import PostgresResource
-from ..settings import HTTP_HEADERS, INDEX_YEAR, IRS_XML_BASE, RAW_DIR
+from ..settings import HTTP_HEADERS, IRS_XML_BASE, RAW_DIR
 from .irs_index import irs_index
 
 SUFFIXES = "ABCD"
+LABEL = re.compile(r"^(\d{4})_TEOS_XML_(\d{2})[A-Z]$")
 
 
 def _zip_url(name: str) -> str:
-    return f"{IRS_XML_BASE}/{INDEX_YEAR}/{name}"
+    return f"{IRS_XML_BASE}/{name[:4]}/{name}"
 
 
-def _probe(name: str) -> str | None:
-    """Return the zip's ETag if it exists, else None."""
+def _probe(name: str) -> tuple[str, str | None]:
+    """Return (name, ETag) if the zip exists, else (name, None)."""
     resp = requests.head(_zip_url(name), headers=HTTP_HEADERS, timeout=30, allow_redirects=True)
     if resp.status_code == 404:
-        return None
+        return name, None
     resp.raise_for_status()
-    return resp.headers.get("ETag", "").strip('"') or "no-etag"
+    return name, resp.headers.get("ETag", "").strip('"') or "no-etag"
 
 
 def _members(name: str, etag: str) -> list[str]:
@@ -50,30 +52,27 @@ def zip_members(pg: PostgresResource) -> MaterializeResult:
         wanted = {o for (o,) in conn.execute("SELECT object_id FROM irs_index").fetchall()}
         labels = [l for (l,) in conn.execute("SELECT DISTINCT xml_batch_id FROM irs_index").fetchall()]
 
-    # Each label like 2026_TEOS_XML_05A stands for a month; probe all its siblings.
-    months = sorted({re.search(r"_(\d{2})[A-Z]$", l).group(1) for l in labels})
-    zips = {}
-    for month in months:
-        for suffix in SUFFIXES:
-            name = f"{INDEX_YEAR}_TEOS_XML_{month}{suffix}.zip"
-            if (etag := _probe(name)) is not None:
-                zips[name] = etag
+    # Each label like 2026_TEOS_XML_05A stands for a year and month; probe all its siblings.
+    months = {(m.group(1), m.group(2)) for l in labels if (m := LABEL.match(l))}
+    unrecognised = sorted(l for l in labels if not LABEL.match(l))
+    candidates = [f"{y}_TEOS_XML_{mm}{s}.zip" for y, mm in sorted(months) for s in SUFFIXES]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        zips = {name: etag for name, etag in pool.map(_probe, candidates) if etag is not None}
+        listings = dict(zip(zips, pool.map(lambda item: _members(*item), zips.items())))
 
-    rows = []
-    for name, etag in zips.items():
-        for object_id in _members(name, etag):
-            if object_id in wanted:
-                rows.append((object_id, name, _zip_url(name), etag))
-
-    with pg.connect() as conn, conn.cursor() as cur:
-        cur.execute("TRUNCATE zip_members")
-        with cur.copy("COPY zip_members (object_id, zip_name, zip_url, zip_etag) FROM STDIN") as copy:
-            for row in rows:
-                copy.write_row(row)
+    rows = [
+        (object_id, name, _zip_url(name), zips[name])
+        for name, ids in listings.items()
+        for object_id in ids
+        if object_id in wanted
+    ]
+    with pg.connect() as conn:
+        pg.replace_table(conn, "zip_members", ("object_id", "zip_name", "zip_url", "zip_etag"), rows)
 
     located = {r[0] for r in rows}
     return MaterializeResult(metadata={
         "zips_found": ", ".join(sorted(zips)),
+        "unrecognised_labels": ", ".join(unrecognised) or "none",
         "wanted_returns": len(wanted),
         "located": len(located),
         "not_located": len(wanted - located),

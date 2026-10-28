@@ -30,7 +30,7 @@ COLUMNS = (
 
 @asset(group_name="phase0", deps=[ccd_schools], description="Nonprofits that might run the state's charter schools.")
 def bmf_candidates(pg: PostgresResource) -> MaterializeResult:
-    path = download_cached(BMF_URL, RAW_DIR / "bmf" / BMF_URL.rsplit("/", 1)[1])
+    path = download_cached(BMF_URL, RAW_DIR / "bmf" / BMF_URL.rsplit("/", 1)[1], refresh=True)
 
     with pg.connect() as conn:
         names = conn.execute(
@@ -62,11 +62,8 @@ def bmf_candidates(pg: PostgresResource) -> MaterializeResult:
             r["FILING_REQ_CD"], r["NTEE_CD"] or None, route, path.name,
         ))
 
-    with pg.connect() as conn, conn.cursor() as cur:
-        cur.execute("TRUNCATE bmf_orgs")
-        with cur.copy(f"COPY bmf_orgs ({', '.join(COLUMNS)}) FROM STDIN") as copy:
-            for row in rows:
-                copy.write_row(row)
+    with pg.connect() as conn:
+        pg.replace_table(conn, "bmf_orgs", COLUMNS, rows)
 
     return MaterializeResult(metadata={
         "pool_size": len(rows),

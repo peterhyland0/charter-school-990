@@ -10,23 +10,33 @@ type Row = {
   st: string;
   is_operating: boolean;
   nonprofits: string | null;
+  total: string;
 };
+
+const LIMIT = 50;
+
+// Treat the user's % and _ as literal characters, not LIKE wildcards.
+function likePattern(q: string): string {
+  return `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+}
 
 async function Search({ searchParams }: { searchParams: PageProps<"/">["searchParams"] }) {
   const params = await searchParams;
   const q = (typeof params.q === "string" ? params.q : "").trim();
-  const pattern = `%${q}%`;
+  const pattern = likePattern(q);
   const rows: Row[] = q
     ? await sql<Row[]>`
         SELECT s.ncessch, s.sch_name, s.lea_name, s.lcity, s.st, s.is_operating,
                (SELECT string_agg(DISTINCT f.org_name, '; ')
                   FROM school_matches m JOIN filings f ON f.object_id = m.object_id
-                 WHERE m.ncessch = s.ncessch) AS nonprofits
+                 WHERE m.ncessch = s.ncessch) AS nonprofits,
+               count(*) OVER () AS total
         FROM schools s
         WHERE s.sch_name ILIKE ${pattern} OR s.lea_name ILIKE ${pattern} OR s.lcity ILIKE ${pattern}
         ORDER BY s.is_operating DESC, s.sch_name
-        LIMIT 25`
+        LIMIT ${LIMIT}`
     : [];
+  const total = rows.length ? Number(rows[0].total) : 0;
 
   return (
     <>
@@ -39,6 +49,11 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
         />
         <button className="rounded bg-foreground px-4 py-2 text-background">Search</button>
       </form>
+      {total > rows.length && (
+        <p className="mt-4 text-sm opacity-70">
+          Showing the first {rows.length} of {total} schools. Add a city or school name to narrow it.
+        </p>
+      )}
       {q && (
         <ul className="mt-6 divide-y divide-black/10 dark:divide-white/15">
           {rows.length === 0 && <li className="py-3 text-sm opacity-70">No schools match “{q}”.</li>}

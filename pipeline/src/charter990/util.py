@@ -68,19 +68,45 @@ def parse_bool(value: str | None) -> bool | None:
     return value.strip().lower() in _TRUE_VALUES
 
 
-def download_cached(url: str, dest: Path) -> Path:
-    """Download url to dest unless it is already there. Writes atomically."""
+def _remote_stamp(url: str) -> str | None:
+    """The server's ETag, or Last-Modified when there is no ETag."""
+    resp = requests.head(url, headers=HTTP_HEADERS, timeout=30, allow_redirects=True)
+    resp.raise_for_status()
+    return resp.headers.get("ETag") or resp.headers.get("Last-Modified")
+
+
+def download_cached(url: str, dest: Path, refresh: bool = False) -> Path:
+    """Download url to dest, writing atomically.
+
+    Without refresh, an existing file is reused as is. With refresh, the file is
+    downloaded again whenever the server's ETag or Last-Modified has changed,
+    which is how files the IRS rewrites in place every month stay current.
+    """
+    stamp_file = dest.with_name(dest.name + ".stamp")
     if dest.exists() and dest.stat().st_size > 0:
-        return dest
+        if not refresh:
+            return dest
+        stamp = _remote_stamp(url)
+        if stamp and stamp_file.exists() and stamp_file.read_text() == stamp:
+            return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     with requests.get(url, headers=HTTP_HEADERS, stream=True, timeout=120) as resp:
         resp.raise_for_status()
         # Some servers gzip the transfer; save the decoded file, not the wire bytes.
         resp.raw.decode_content = True
         with tempfile.NamedTemporaryFile(dir=dest.parent, delete=False) as tmp:
-            shutil.copyfileobj(resp.raw, tmp, length=1 << 20)
             tmp_path = Path(tmp.name)
+            try:
+                shutil.copyfileobj(resp.raw, tmp, length=1 << 20)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        stamp = resp.headers.get("ETag") or resp.headers.get("Last-Modified")
     tmp_path.replace(dest)
+    if stamp:
+        stamp_file.write_text(stamp)
+    else:
+        stamp_file.unlink(missing_ok=True)
     return dest
 
 

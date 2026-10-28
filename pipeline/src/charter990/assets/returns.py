@@ -23,8 +23,9 @@ TIMEOUT = (15, 60)
 # Errors that retrying can't fix, such as an unsupported compression method.
 PERMANENT_ERRORS = (NotImplementedError, zipfile.BadZipFile, KeyError)
 
-# Every return for each EIN's newest tax period, so an amended return and the
-# original it replaces are both fetched and the parser can pick between them.
+# Every return for each EIN's newest tax period, across all index years, so an
+# amended return and the original it replaces are both fetched and the parser
+# can pick between them. zip_name is NULL when no zip holds the return.
 SELECT_LATEST = """
     WITH latest AS (
         SELECT ein, max(tax_period) AS tax_period FROM irs_index GROUP BY ein
@@ -32,7 +33,7 @@ SELECT_LATEST = """
     SELECT i.object_id, z.zip_name, z.zip_url
     FROM irs_index i
     JOIN latest l ON l.ein = i.ein AND l.tax_period = i.tax_period
-    JOIN zip_members z ON z.object_id = i.object_id
+    LEFT JOIN zip_members z ON z.object_id = i.object_id
 """
 
 
@@ -68,8 +69,13 @@ def read_member(zf: RemoteZip, name: str) -> bytes:
 
 
 def _fetch_zip(zip_url: str, object_ids: list[str]) -> tuple[int, list[tuple[str, str]]]:
+    """Fetch the given returns from one zip. Never raises: failures are returned."""
     fetched, errors = 0, []
-    with RemoteZip(zip_url, headers=HTTP_HEADERS, timeout=TIMEOUT) as zf:
+    try:
+        zf = RemoteZip(zip_url, headers=HTTP_HEADERS, timeout=TIMEOUT)
+    except Exception as exc:  # the zip's table of contents couldn't be read
+        return 0, [(object_id, f"could not open {zip_url}: {exc!r}") for object_id in object_ids]
+    with zf:
         for object_id in object_ids:
             member = f"{object_id}_public.xml"
             for attempt in range(3):
@@ -97,12 +103,14 @@ def raw_returns(pg: PostgresResource) -> MaterializeResult:
     with pg.connect() as conn:
         selected = conn.execute(SELECT_LATEST).fetchall()
 
-    todo = defaultdict(list)
+    todo, errors = defaultdict(list), []
     for object_id, _, zip_url in selected:
-        if not xml_path(object_id).exists():
+        if zip_url is None:
+            errors.append((object_id, "listed in the IRS index but not found in any zip"))
+        elif not xml_path(object_id).exists():
             todo[zip_url].append(object_id)
 
-    fetched, errors = 0, []
+    fetched = 0
     with ThreadPoolExecutor(max_workers=max(1, len(todo))) as pool:
         for n, errs in pool.map(lambda item: _fetch_zip(*item), todo.items()):
             fetched += n
@@ -115,7 +123,7 @@ def raw_returns(pg: PostgresResource) -> MaterializeResult:
 
     return MaterializeResult(metadata={
         "selected": len(selected),
-        "already_cached": len(selected) - sum(len(v) for v in todo.values()),
+        "already_cached": len(selected) - sum(len(v) for v in todo.values()) - sum(1 for r in selected if r[2] is None),
         "fetched": fetched,
         "failed": len(errors),
         "failure_rate": round(len(errors) / len(selected), 4) if selected else 0.0,

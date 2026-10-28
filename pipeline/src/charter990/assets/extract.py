@@ -60,7 +60,11 @@ def _person_name(group) -> str | None:
 def parse_return(data: bytes) -> tuple[dict, list[dict]]:
     root = etree.fromstring(data, PARSER)
     header = root.find("e:ReturnHeader", NS)
+    if header is None:
+        raise ValueError("no ReturnHeader")
     return_type = _text(header, "ReturnTypeCd")
+    if return_type not in ("990", "990EZ"):
+        raise ValueError(f"unsupported return type {return_type!r}")
     is_ez = return_type == "990EZ"
     body = root.find(_xp("ReturnData/IRS990EZ" if is_ez else "ReturnData/IRS990"), NS)
     if body is None:
@@ -110,6 +114,8 @@ def parse_return(data: bytes) -> tuple[dict, list[dict]]:
                 "is_key_employee": bool(parse_bool(_text(g, "KeyEmployeeInd"))),
                 "is_hce": bool(parse_bool(_text(g, "HighestCompensatedEmployeeInd"))),
             })
+    if not filing["ein"]:
+        raise ValueError("no Filer/EIN")
     return filing, people
 
 
@@ -136,33 +142,44 @@ INSERT_PERSON = f"""
 """
 
 
+def _store(conn, object_id: str, zip_name: str, data: bytes, filing: dict, people: list[dict]) -> None:
+    sha = hashlib.sha256(data).hexdigest()
+    conn.execute(UPSERT_FILING, (object_id, *[filing[c] for c in FILING_COLUMNS], zip_name, sha, PARSER_VERSION))
+    conn.execute("DELETE FROM filing_people WHERE object_id = %s", (object_id,))
+    with conn.cursor() as cur:
+        cur.executemany(INSERT_PERSON, [
+            (object_id, i, *[p[c] for c in PEOPLE_COLUMNS]) for i, p in enumerate(people)
+        ])
+
+
 @asset(group_name="phase0", deps=[raw_returns], description="Parsed facts and people for each cached return.")
 def parsed_filings(pg: PostgresResource) -> MaterializeResult:
     parsed = failed = people_rows = 0
     with pg.connect() as conn:
         selected = conn.execute(SELECT_LATEST).fetchall()
         conn.execute("DELETE FROM load_errors WHERE stage = %s", (STAGE,))
+        # Drop filings that are no longer selected, for example because their
+        # nonprofit left the candidate pool, so they can't match schools.
+        pruned = conn.execute(
+            "DELETE FROM filings WHERE NOT (object_id = ANY(%s))", ([r[0] for r in selected],)
+        ).rowcount
         for object_id, zip_name, _ in selected:
             path = xml_path(object_id)
-            if not path.exists():
+            if zip_name is None or not path.exists():
                 continue  # the fetch failure is already logged
             data = path.read_bytes()
             try:
                 filing, people = parse_return(data)
+                # A savepoint per return: a database error rolls back this one only.
+                with conn.transaction():
+                    _store(conn, object_id, zip_name, data, filing, people)
             except Exception as exc:
                 failed += 1
                 pg.log_error(conn, STAGE, object_id, repr(exc))
                 continue
-            sha = hashlib.sha256(data).hexdigest()
-            conn.execute(UPSERT_FILING, (object_id, *[filing[c] for c in FILING_COLUMNS], zip_name, sha, PARSER_VERSION))
-            conn.execute("DELETE FROM filing_people WHERE object_id = %s", (object_id,))
-            with conn.cursor() as cur:
-                cur.executemany(INSERT_PERSON, [
-                    (object_id, i, *[p[c] for c in PEOPLE_COLUMNS]) for i, p in enumerate(people)
-                ])
             parsed += 1
             people_rows += len(people)
 
     return MaterializeResult(metadata={
-        "parsed": parsed, "failed": failed, "people_rows": people_rows,
+        "parsed": parsed, "failed": failed, "people_rows": people_rows, "pruned": pruned,
     })
