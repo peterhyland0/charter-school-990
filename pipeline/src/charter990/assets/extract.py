@@ -8,10 +8,19 @@ from dagster import MaterializeResult, asset
 from lxml import etree
 
 from ..resources import PostgresResource
-from ..util import name_key, normalize_site, parse_bool, phone10, zip5
+from ..util import (
+    MGMT_EXPLANATION_REF,
+    is_management_service,
+    name_key,
+    named_in,
+    normalize_site,
+    parse_bool,
+    phone10,
+    zip5,
+)
 from .returns import SELECT_LATEST, raw_returns, xml_path
 
-PARSER_VERSION = "0.3"
+PARSER_VERSION = "0.5"
 STAGE = "parse"
 # Returns are untrusted input: no entity expansion, no network access.
 PARSER = etree.XMLParser(resolve_entities=False, no_network=True)
@@ -60,7 +69,35 @@ def _person_name(group) -> str | None:
     return _text(group, "PersonNm", "BusinessName/BusinessNameLine1Txt", "BusinessName/BusinessNameLine1")
 
 
-def parse_return(data: bytes) -> tuple[dict, list[dict]]:
+def _mgmt_explanation(root) -> str | None:
+    """Schedule O text explaining Part VI line 3, the delegation question."""
+    parts = [
+        _text(d, "ExplanationTxt", "ShortExplanationTxt")
+        for d in root.findall("ReturnData/IRS990ScheduleO/SupplementalInformationDetail")
+        if MGMT_EXPLANATION_REF.search(_text(d, "FormAndLineReferenceDesc") or "")
+    ]
+    return "\n\n".join(p for p in parts if p) or None
+
+
+def _contractors(body, explanation: str | None) -> list[dict]:
+    """Part VII Section B: the five highest-paid independent contractors."""
+    rows = []
+    for g in body.findall("ContractorCompensationGrp"):
+        name = " ".join(filter(None, (
+            _text(g, "ContractorName/BusinessName/BusinessNameLine1Txt", "ContractorName/PersonNm"),
+            _text(g, "ContractorName/BusinessName/BusinessNameLine2Txt"),
+        ))) or None
+        services = _text(g, "ServicesDesc")
+        rows.append({
+            "name": name,
+            "services": services,
+            "compensation": _int(_text(g, "CompensationAmt")),
+            "is_management": is_management_service(services) or named_in(name, explanation),
+        })
+    return rows
+
+
+def parse_return(data: bytes) -> tuple[dict, list[dict], list[dict]]:
     root = etree.fromstring(data, PARSER)
     _strip_namespaces(root)
     header = root.find("ReturnHeader")
@@ -92,6 +129,12 @@ def parse_return(data: bytes) -> tuple[dict, list[dict]]:
         "website_host": host,
         "website_domain": domain,
         "total_revenue": _int(_text(body, "TotalRevenueAmt" if is_ez else "CYTotalRevenueAmt")),
+        # End-of-year balances: Part X on the 990, Part II on the 990-EZ.
+        "total_expenses": _int(_text(body, "TotalExpensesAmt" if is_ez else "CYTotalExpensesAmt")),
+        "total_assets": _int(_text(body, "Form990TotalAssetsGrp/EOYAmt" if is_ez else "TotalAssetsEOYAmt")),
+        "total_liabilities": _int(_text(body, "SumOfTotalLiabilitiesGrp/EOYAmt" if is_ez else "TotalLiabilitiesEOYAmt")),
+        "net_assets": _int(_text(body, "NetAssetsOrFundBalancesGrp/EOYAmt", "NetAssetsOrFundBalancesEOYAmt")),
+        "mgmt_explanation": None if is_ez else _mgmt_explanation(root),
         # 990-EZ does not ask whether management was delegated.
         "mgmt_delegated": None if is_ez else parse_bool(_text(body, "DelegationOfMgmtDutiesInd")),
         # The filer's own contact details, used as matching signals. Foreign
@@ -131,13 +174,15 @@ def parse_return(data: bytes) -> tuple[dict, list[dict]]:
             })
     if not filing["ein"]:
         raise ValueError("no Filer/EIN")
-    return filing, people
+    contractors = [] if is_ez else _contractors(body, filing["mgmt_explanation"])
+    return filing, people, contractors
 
 
 FILING_COLUMNS = (
     "ein", "return_type", "return_version", "tax_period_begin", "tax_period_end",
     "return_ts", "amended", "org_name", "dba_name", "website", "website_host",
     "website_domain", "total_revenue", "mgmt_delegated",
+    "total_expenses", "total_assets", "total_liabilities", "net_assets", "mgmt_explanation",
     "phone10", "street", "city", "state", "zip5", "name_key", "dba_key",
 )
 PEOPLE_COLUMNS = (
@@ -152,19 +197,30 @@ UPSERT_FILING = f"""
     source_zip = EXCLUDED.source_zip, sha256 = EXCLUDED.sha256,
     parser_version = EXCLUDED.parser_version, parsed_at = now()
 """
+CONTRACTOR_COLUMNS = ("name", "services", "compensation", "is_management")
+INSERT_CONTRACTOR = f"""
+    INSERT INTO filing_contractors (object_id, seq, {', '.join(CONTRACTOR_COLUMNS)})
+    VALUES (%s, %s, {', '.join(['%s'] * len(CONTRACTOR_COLUMNS))})
+"""
 INSERT_PERSON = f"""
     INSERT INTO filing_people (object_id, seq, {', '.join(PEOPLE_COLUMNS)})
     VALUES (%s, %s, {', '.join(['%s'] * len(PEOPLE_COLUMNS))})
 """
 
 
-def _store(conn, object_id: str, zip_name: str, data: bytes, filing: dict, people: list[dict]) -> None:
+def _store(conn, object_id: str, zip_name: str, data: bytes, filing: dict, people: list[dict],
+           contractors: list[dict]) -> None:
     sha = hashlib.sha256(data).hexdigest()
     conn.execute(UPSERT_FILING, (object_id, *[filing[c] for c in FILING_COLUMNS], zip_name, sha, PARSER_VERSION))
     conn.execute("DELETE FROM filing_people WHERE object_id = %s", (object_id,))
     with conn.cursor() as cur:
         cur.executemany(INSERT_PERSON, [
             (object_id, i, *[p[c] for c in PEOPLE_COLUMNS]) for i, p in enumerate(people)
+        ])
+    conn.execute("DELETE FROM filing_contractors WHERE object_id = %s", (object_id,))
+    with conn.cursor() as cur:
+        cur.executemany(INSERT_CONTRACTOR, [
+            (object_id, i, *[k[c] for c in CONTRACTOR_COLUMNS]) for i, k in enumerate(contractors)
         ])
 
 
@@ -191,10 +247,10 @@ def parsed_filings(pg: PostgresResource) -> MaterializeResult:
                 unchanged += 1  # same file, same parser: nothing to redo
                 continue
             try:
-                filing, people = parse_return(data)
+                filing, people, contractors = parse_return(data)
                 # A savepoint per return: a database error rolls back this one only.
                 with conn.transaction():
-                    _store(conn, object_id, zip_name, data, filing, people)
+                    _store(conn, object_id, zip_name, data, filing, people, contractors)
             except Exception as exc:
                 failed += 1
                 pg.log_error(conn, STAGE, object_id, repr(exc))

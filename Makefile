@@ -6,7 +6,7 @@ export DAGSTER_HOME := $(CURDIR)/pipeline/.dagster_home
 # over the environment, which would send NEON=1 corrections to the local database.
 DAGSTER_PORT ?= 3070
 
-.PHONY: db pipeline dagster web test correct unlink no-nonprofit corrections retire neon-load neon-check neon-reader neon-roles neon-rematch server-sync
+.PHONY: db pipeline dagster web test correct unlink no-nonprofit corrections retire neon-load neon-check neon-sync-filings neon-reader neon-roles neon-rematch server-sync
 
 db:  ## Apply each migration once, in order, to $$DATABASE_URL (creates the local database if needed)
 	@if [ "$(DATABASE_URL)" = "postgresql://localhost/$(DB)" ]; then \
@@ -43,7 +43,7 @@ test:
 NEON_ENV = set -a && . $(CURDIR)/.env.neon && set +a && \
 	case "$$NEON_DATABASE_URL" in *neon.tech*) ;; \
 	  *) echo "NEON_DATABASE_URL missing or not a Neon URL: check .env.neon (quote the value)" >&2; exit 1 ;; esac
-CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people school_matches school_status match_corrections
+CHECK_TABLES = schools bmf_orgs irs_index zip_members filings filing_people filing_contractors school_matches school_status match_corrections
 
 # The first load only. Once live, the scheduled pipeline keeps Neon current and
 # hand corrections are made there, so a reload would replace them with the
@@ -57,6 +57,16 @@ neon-load:  ## First load: copy the local database into an empty Neon database
 	  pg_dump --no-owner --no-acl --no-comments --clean --if-exists "$(DATABASE_URL)" \
 	    | psql -q -v ON_ERROR_STOP=1 -o /dev/null "$$NEON_DATABASE_URL" && \
 	  echo "loaded; run make neon-check"
+
+# Parsed returns change when the parser does. Copy them into Neon in one
+# transaction: the live site keeps reading the old rows until it commits.
+SYNC_TABLES = filings filing_people filing_contractors
+neon-sync-filings:  ## Apply migrations to Neon, then copy the parsed returns from local in one transaction
+	@$(NEON_ENV) && DATABASE_URL="$$NEON_DATABASE_URL" $(MAKE) -s db
+	@$(NEON_ENV) && ( \
+	  echo "DELETE FROM filing_contractors; DELETE FROM filing_people; DELETE FROM filings;"; \
+	  pg_dump --data-only --no-owner --no-acl $(foreach t,$(SYNC_TABLES),--table=$(t)) "$(DATABASE_URL)"; \
+	) | psql -q -1 -v ON_ERROR_STOP=1 -o /dev/null "$$NEON_DATABASE_URL" && echo "synced: $(SYNC_TABLES)"
 
 neon-check:  ## Row counts, local versus Neon
 	@$(NEON_ENV) && for t in $(CHECK_TABLES); do \

@@ -70,3 +70,27 @@ def test_network_key_falls_back_to_two_words():
     assert network_key("Great Hearts Academies - Veritas", firsts, twos, 200) == "GREAT HEARTS"
     assert first_two("Great Hearts Academies - Veritas") == "GREAT HEARTS"
     assert network_key("Great Oaks Charter School", firsts, {"GREAT OAKS": 500}, 200) is None
+
+
+def test_management_service_rule():
+    from charter990.util import is_management_service
+
+    for yes in ("EDUCATIONAL SERVICE PROVIDER", "MANAGEMENT SERVICES", "Management fees", "CHARTER SCHOOL MANAGEMENT",
+                "EDUCATION MGMT", "EDUCATIONAL SUPPORT", "CMO MANAGEMENT"):
+        assert is_management_service(yes), yes
+    for no in ("PROPERTY MANAGEMENT", "CONSTRUCTION MANAGEMENT", "FOOD SERVICE MANAGEMENT", "INVESTMENT MANAGEMENT",
+               "SPECIAL EDUCATION SERVICES", "EDUCATION CONSULTING", "EDUCATIONAL SERVICES", "JANITORIAL SERVICES", "MANAGED IT SERVICES", None):
+        assert not is_management_service(no), no
+
+
+def test_management_explanation_reference_and_names():
+    from charter990.util import MGMT_EXPLANATION_REF, named_in
+
+    for ref in ("FORM 990, PART VI, SECTION A, LINE 3", "Part VI Line 3", "Form 990, Part VI, Line 3 Delegation of management duties",
+                "CORE FORM, PART VI, SECTION A; QUESTION 3", "VI-3"):
+        assert MGMT_EXPLANATION_REF.search(ref), ref
+    for ref in ("Form 990, Part VI, Line 13", "Form 990, Part VII, Section A, Line 3", "Part VI, Section B, Line 11b"):
+        assert not MGMT_EXPLANATION_REF.search(ref), ref
+    assert named_in("ACADEMICA DADE LLC", "Academica Dade, LLC, a professional charter school support organization")
+    assert not named_in("ADP", "ADP is too short to trust")
+    assert not named_in("ACADEMICA BROWARD LLC", "Academica Dade, LLC")

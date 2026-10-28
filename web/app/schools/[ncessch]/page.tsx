@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import { Suspense } from "react";
 import { sql } from "@/lib/db";
-import { day, formatEin, money, propublicaUrl } from "@/lib/format";
+import { day, formatEin, money, month, nextReturn, propublicaUrl } from "@/lib/format";
 import { reasonText, ROLE_LABEL, SIGNAL_LABEL, STATUS_CLASS, STATUS_LABEL, type Role, type Status } from "@/lib/labels";
 
 type School = {
@@ -38,7 +38,11 @@ type Match = {
   return_ts: Date | null;
   amended: boolean;
   total_revenue: string | null;
+  total_expenses: string | null;
+  total_assets: string | null;
+  net_assets: string | null;
   mgmt_delegated: boolean | null;
+  mgmt_explanation: string | null;
   source_zip: string;
   filer_state: string | null;
 };
@@ -54,12 +58,80 @@ type Person = {
   total: string;
 };
 
-function managementLabel(m: Match, managers: Match[]): string {
-  if (m.return_type === "990EZ") return "Not asked on Form 990-EZ";
-  if (m.mgmt_delegated === null) return "Not answered";
-  if (!m.mgmt_delegated) return "No";
-  const names = managers.map((x) => x.org_name).join(" or ");
-  return names ? `Yes, management duties are delegated, likely to ${names}` : "Yes, management duties are delegated";
+type Contractor = {
+  object_id: string;
+  name: string | null;
+  services: string | null;
+  compensation: string | null;
+  is_management: boolean;
+};
+
+// Where each fact sits on the return, so a rep can check it.
+const LINES = {
+  "990": { revenue: "Part I, line 12", expenses: "Part I, line 18", assets: "Part X, line 16", net: "Part X, line 33" },
+  "990EZ": { revenue: "line 9", expenses: "line 17", assets: "line 25", net: "line 27" },
+} as const;
+
+const EXPLANATION_PREVIEW = 280;
+
+// The management answer from three sources on the return, plus the matcher's
+// linked management organization. Sources are shown side by side, not merged.
+function ManagementCompany({ m, managers, contractors }: { m: Match; managers: Match[]; contractors: Contractor[] }) {
+  if (m.return_type === "990EZ") {
+    return <p className="text-sm">Not asked on Form 990-EZ.</p>;
+  }
+  const hired = contractors.filter((c) => c.is_management);
+  const named = [...hired.map((c) => c.name), ...managers.map((x) => x.org_name)].filter(Boolean);
+  const unique = [...new Set(named)];
+  const says = m.mgmt_delegated === null ? "Not answered" : m.mgmt_delegated ? "Yes" : "No";
+  const headline =
+    m.mgmt_delegated || hired.length
+      ? unique.length
+        ? `Yes: ${unique.join(" and ")}`
+        : "Yes, management duties are delegated"
+      : says;
+  const text = m.mgmt_explanation;
+  return (
+    <div className="text-sm">
+      <p className="font-medium">{headline}</p>
+      <ul className="mt-1 space-y-1 opacity-90">
+        <li>
+          <span className="opacity-70">Part VI, line 3 (delegates management?):</span> {says}
+        </li>
+        {hired.map((c, i) => (
+          <li key={i}>
+            <span className="opacity-70">Contractor list (Part VII, Section B):</span> {c.name}, {c.services?.toLowerCase()},{" "}
+            {money(c.compensation)}
+          </li>
+        ))}
+        {text && (
+          <li>
+            <span className="opacity-70">Explanation (Schedule O):</span>{" "}
+            {text.length <= EXPLANATION_PREVIEW ? (
+              <q>{text}</q>
+            ) : (
+              <details className="inline">
+                <summary className="inline cursor-pointer list-none">
+                  <q>{text.slice(0, EXPLANATION_PREVIEW).trimEnd()}…</q> <span className="underline">show more</span>
+                </summary>
+                <q className="mt-1 block whitespace-pre-line">{text}</q>
+              </details>
+            )}
+          </li>
+        )}
+        {managers.map((x) => (
+          <li key={x.ein}>
+            <span className="opacity-70">Linked nonprofit:</span> {x.org_name}, the management organization this school is matched to
+          </li>
+        ))}
+      </ul>
+      {m.mgmt_delegated === false && hired.length > 0 && (
+        <p className="mt-1 rounded bg-amber-500/10 p-2">
+          The sources disagree: the return says management isn&apos;t delegated, but lists a management contractor.
+        </p>
+      )}
+    </div>
+  );
 }
 
 // Cards first for the nonprofits a rep acts on, then everything else.
@@ -100,7 +172,8 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
   const matches = await sql<Match[]>`
     SELECT m.ein, m.tier, m.role, m.source, m.signals, m.ambiguous, m.evidence, f.object_id, f.org_name, f.return_type,
            f.tax_period_begin, f.tax_period_end, f.return_ts, f.amended,
-           f.total_revenue, f.mgmt_delegated, f.source_zip, b.state AS filer_state
+           f.total_revenue, f.total_expenses, f.total_assets, f.net_assets,
+           f.mgmt_delegated, f.mgmt_explanation, f.source_zip, b.state AS filer_state
     FROM school_matches m
     JOIN filings f ON f.object_id = m.object_id
     LEFT JOIN bmf_orgs b ON b.ein = m.ein
@@ -121,6 +194,14 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
         FROM filing_people
         WHERE object_id IN ${sql(cards.map((m) => m.object_id))}
         ORDER BY object_id, (coalesce(comp_org, 0) + coalesce(comp_related, 0) + coalesce(comp_other, 0)) DESC, seq`
+    : [];
+
+  const contractors = cards.length
+    ? await sql<Contractor[]>`
+        SELECT object_id, name, services, compensation, is_management
+        FROM filing_contractors
+        WHERE object_id IN ${sql(cards.map((m) => m.object_id))}
+        ORDER BY object_id, compensation DESC NULLS LAST, seq`
     : [];
 
   return (
@@ -169,6 +250,9 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
 
       {cards.map((m) => {
         const rows = people.filter((p) => p.object_id === m.object_id);
+        const hired = contractors.filter((c) => c.object_id === m.object_id);
+        const lines = m.return_type === "990EZ" ? LINES["990EZ"] : LINES["990"];
+        const next = nextReturn(m.tax_period_end);
         const correction = m.evidence.correction;
         return (
           <section key={m.ein} className="mt-6 rounded border border-black/15 p-4 dark:border-white/20">
@@ -204,22 +288,40 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
               ))}
             </ul>
 
-            <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
-              <div>
-                <dt className="opacity-70">Period covered</dt>
-                <dd>{day(m.tax_period_begin)} – {day(m.tax_period_end)}</dd>
-              </div>
-              <div>
-                <dt className="opacity-70">Total revenue</dt>
-                <dd>{money(m.total_revenue)}</dd>
-              </div>
-              {m.role === "operator" && (
-                <div>
-                  <dt className="opacity-70">Management company decides?</dt>
-                  <dd>{managementLabel(m, managers)}</dd>
-                </div>
+            <p className="mt-4 text-sm">
+              <span className="opacity-70">Covers</span> {day(m.tax_period_begin)} – {day(m.tax_period_end)}
+              {next && (
+                <span className="opacity-70">
+                  {" "}
+                  · The next return (year ending {month(next.yearEnd)}) is due {day(next.due)}, or {day(next.extended)} with the
+                  usual extension, and appears in IRS data a few months later.
+                </span>
               )}
+            </p>
+
+            <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-4">
+              {(
+                [
+                  ["Revenue", m.total_revenue, lines.revenue],
+                  ["Expenses", m.total_expenses, lines.expenses],
+                  ["Total assets", m.total_assets, lines.assets],
+                  ["Net assets", m.net_assets, lines.net],
+                ] as const
+              ).map(([label, value, line]) => (
+                <div key={label}>
+                  <dt className="opacity-70">{label}</dt>
+                  <dd>{money(value)}</dd>
+                  <dd className="text-xs opacity-50">{line}</dd>
+                </div>
+              ))}
             </dl>
+
+            {m.role === "operator" && (
+              <section className="mt-4">
+                <h3 className="font-medium">Management company</h3>
+                <ManagementCompany m={m} managers={managers} contractors={hired} />
+              </section>
+            )}
 
             <h3 className="mt-5 font-medium">Leaders and pay</h3>
             {rows.length === 0 ? (
@@ -253,6 +355,22 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
                   </tbody>
                 </table>
               </div>
+            )}
+
+            {hired.length > 0 && (
+              <details className="mt-4 text-sm">
+                <summary className="cursor-pointer font-medium">
+                  Largest contractors ({hired.length}) <span className="text-xs font-normal opacity-50">Part VII, Section B</span>
+                </summary>
+                <ul className="mt-1 space-y-0.5">
+                  {hired.map((c, i) => (
+                    <li key={i}>
+                      {c.name} · {c.services?.toLowerCase()} · {money(c.compensation)}
+                      {c.is_management && <span className="opacity-60"> · management</span>}
+                    </li>
+                  ))}
+                </ul>
+              </details>
             )}
 
             <p className="mt-4 text-xs opacity-70">

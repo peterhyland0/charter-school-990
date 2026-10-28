@@ -258,3 +258,45 @@ def network_key(name: str | None, first_counts, two_counts, limit: int) -> str |
     if two is not None and two_counts.get(two, 0) <= limit:
         return two
     return None
+
+
+# Part VII Section B contractors whose service is running schools: management
+# companies and education service providers. Measured on the cached returns'
+# service descriptions; "management" also describes investments, food service,
+# facilities and construction, which are excluded. Bare "educational services"
+# is mostly curriculum and special-education vendors (5 of 20 flagged in a spot
+# check), so it counts only when the Schedule O explanation names the vendor.
+_MGMT_SERVICE = re.compile(
+    r"\b(MANAGEMENT|MGMT|MANAGER|OPERATOR|EMO|CMO)\b"
+    r"|\bEDUCATION(AL)? (SERVICE PROVIDER|SUPPORT)\b"
+)
+_NOT_MGMT_SERVICE = re.compile(
+    r"\b(INVESTMENTS?|FOOD|CAFETERIA|FACILITY|FACILITIES|PROPERTY|PROPERTIES|REAL ESTATE|CONSTRUCTION|"
+    r"PROJECT|BUILDING|FINANCIAL|FINANCE|IT|TECHNOLOGY|EVENTS?|ENROLLMENT|RISK|ASSETS?|BUSINESS|"
+    r"CONSULT\w*|SPECIAL|AFTER ?SCHOOL|EARLY CHILDHOOD|ONLINE|BUS|TRANSPORT\w*|LEGAL|ACCOUNT\w*|"
+    r"PAYROLL|MARKETING|DATA|RECORDS|HEALTH|NURS\w*|THERAP\w*|ENERGY|WASTE|JANITORIAL|CLEANING|"
+    r"SECURITY|FUND\w*|LEASE|RENT\w*)\b"
+)
+
+
+def is_management_service(services: str | None) -> bool:
+    """Whether a contractor's service description reads like running schools."""
+    text = " ".join((services or "").upper().split())
+    return bool(_MGMT_SERVICE.search(text)) and not _NOT_MGMT_SERVICE.search(text)
+
+
+# Schedule O line references to Part VI line 3, the delegation question, as
+# filers write them: "Form 990, Part VI, Section A, line 3", "Part VI Line 3",
+# "Core form, Part VI, Section A; question 3", "VI-3". Not line 13 or Part VII.
+MGMT_EXPLANATION_REF = re.compile(
+    r"PART\s*VI\b(?!I).*?\b(LINE|LN|L|QUESTION|Q)\s*\.?\s*3(?![0-9])"
+    r"|\bVI[\s,-]*(SECTION\s*A[\s,-]*)?(LINE\s*)?3(?![0-9])",
+    re.I | re.S,
+)
+
+
+def named_in(name: str | None, text: str | None) -> bool:
+    """Whether an organisation's name appears in free text, compared as name keys
+    ("ACADEMICA DADE LLC" is found in "Academica Dade, LLC, a professional...")."""
+    key, haystack = name_key(name), name_key(text)
+    return bool(key and haystack and len(key) >= 5 and f" {key} " in f" {haystack} ")

@@ -12,6 +12,7 @@ from .assets.zips import zip_members
 from .checks import (
     corrections_hold,
     fetch_failure_rate,
+    known_managers_named,
     known_networks_in_pool,
     known_roles,
     match_rate,
@@ -41,6 +42,7 @@ defs = Definitions(
     asset_checks=[
         operating_school_count,
         known_networks_in_pool,
+        known_managers_named,
         success_return_located,
         fetch_failure_rate,
         no_support_groups_verified,

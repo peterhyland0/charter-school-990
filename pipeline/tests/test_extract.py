@@ -18,6 +18,10 @@ RETURN = """﻿<?xml version="1.0" encoding="utf-8"?>
       <WebsiteAddressTxt>WWW.EXAMPLE.ORG</WebsiteAddressTxt>
       <DelegationOfMgmtDutiesInd>true</DelegationOfMgmtDutiesInd>
       <CYTotalRevenueAmt>1234567</CYTotalRevenueAmt>
+      <CYTotalExpensesAmt>1100000</CYTotalExpensesAmt>
+      <TotalAssetsEOYAmt>900000</TotalAssetsEOYAmt>
+      <TotalLiabilitiesEOYAmt>400000</TotalLiabilitiesEOYAmt>
+      <NetAssetsOrFundBalancesEOYAmt>500000</NetAssetsOrFundBalancesEOYAmt>
       <Form990PartVIISectionAGrp>
         <PersonNm>JANE DOE</PersonNm><TitleTxt>CEO</TitleTxt>
         <AverageHoursPerWeekRt>40.00</AverageHoursPerWeekRt><OfficerInd>X</OfficerInd>
@@ -25,7 +29,25 @@ RETURN = """﻿<?xml version="1.0" encoding="utf-8"?>
         <ReportableCompFromRltdOrgAmt>0</ReportableCompFromRltdOrgAmt>
         <OtherCompensationAmt>12000</OtherCompensationAmt>
       </Form990PartVIISectionAGrp>
+      <ContractorCompensationGrp>
+        <ContractorName><BusinessName><BusinessNameLine1Txt>ACADEMICA DADE LLC</BusinessNameLine1Txt></BusinessName></ContractorName>
+        <ServicesDesc>EDUCATIONAL SERVICE PROVIDER</ServicesDesc><CompensationAmt>10511248</CompensationAmt>
+      </ContractorCompensationGrp>
+      <ContractorCompensationGrp>
+        <ContractorName><BusinessName><BusinessNameLine1Txt>CHENEY BROTHERS INC</BusinessNameLine1Txt></BusinessName></ContractorName>
+        <ServicesDesc>FOOD SERVICE MANAGEMENT</ServicesDesc><CompensationAmt>4205214</CompensationAmt>
+      </ContractorCompensationGrp>
     </IRS990>
+    <IRS990ScheduleO>
+      <SupplementalInformationDetail>
+        <FormAndLineReferenceDesc>FORM 990, PART VI, SECTION A, LINE 3</FormAndLineReferenceDesc>
+        <ExplanationTxt>ACADEMICA DADE, LLC PROVIDES PROFESSIONAL SERVICES TO THE SCHOOL.</ExplanationTxt>
+      </SupplementalInformationDetail>
+      <SupplementalInformationDetail>
+        <FormAndLineReferenceDesc>FORM 990, PART VI, LINE 13</FormAndLineReferenceDesc>
+        <ExplanationTxt>WHISTLEBLOWER POLICY.</ExplanationTxt>
+      </SupplementalInformationDetail>
+    </IRS990ScheduleO>
   </ReturnData>
 </Return>"""
 
@@ -35,7 +57,7 @@ def build(rtype="990", ein="<EIN>123456789</EIN>") -> bytes:
 
 
 def test_parses_core_facts():
-    filing, people = parse_return(build())
+    filing, people, contractors = parse_return(build())
     assert filing["ein"] == "123456789"
     assert filing["amended"] is True
     assert filing["mgmt_delegated"] is True
@@ -63,7 +85,7 @@ def test_batch_label_pattern():
 
 def test_filer_contact_details():
     data = build(ein="<EIN>123456789</EIN><PhoneNum>6462777170</PhoneNum><USAddress><AddressLine1Txt>95 PINE ST</AddressLine1Txt><CityNm>NEW YORK</CityNm><StateAbbreviationCd>NY</StateAbbreviationCd><ZIPCd>100051234</ZIPCd></USAddress>")
-    filing, _ = parse_return(data)
+    filing, _, _ = parse_return(data)
     assert filing["phone10"] == "6462777170"
     assert (filing["street"], filing["city"], filing["state"], filing["zip5"]) == ("95 PINE ST", "NEW YORK", "NY", "10005")
     assert filing["name_key"] == "EXAMPLE CHARTER SCHOOL"
@@ -71,5 +93,37 @@ def test_filer_contact_details():
 
 def test_return_without_namespace_parses():
     data = build().replace(b' xmlns="http://www.irs.gov/efile"', b"")
-    filing, people = parse_return(data)
+    filing, people, _ = parse_return(data)
     assert filing["ein"] == "123456789" and people[0]["name"] == "JANE DOE"
+
+
+def test_finances_contractors_and_management_explanation():
+    filing, _, contractors = parse_return(build())
+    assert (filing["total_expenses"], filing["total_assets"], filing["total_liabilities"], filing["net_assets"]) == (
+        1100000, 900000, 400000, 500000)
+    # Only the Part VI line 3 explanation, not line 13's.
+    assert filing["mgmt_explanation"] == "ACADEMICA DADE, LLC PROVIDES PROFESSIONAL SERVICES TO THE SCHOOL."
+    assert [(c["name"], c["compensation"], c["is_management"]) for c in contractors] == [
+        ("ACADEMICA DADE LLC", 10511248, True),
+        ("CHENEY BROTHERS INC", 4205214, False),
+    ]
+
+
+EZ_RETURN = """<Return xmlns="http://www.irs.gov/efile">
+  <ReturnHeader><ReturnTypeCd>990EZ</ReturnTypeCd><TaxPeriodEndDt>2025-06-30</TaxPeriodEndDt>
+    <Filer><EIN>987654321</EIN><BusinessName><BusinessNameLine1Txt>SMALL CHARTER</BusinessNameLine1Txt></BusinessName></Filer>
+  </ReturnHeader>
+  <ReturnData><IRS990EZ>
+    <TotalRevenueAmt>150000</TotalRevenueAmt><TotalExpensesAmt>140000</TotalExpensesAmt>
+    <Form990TotalAssetsGrp><BOYAmt>1</BOYAmt><EOYAmt>60000</EOYAmt></Form990TotalAssetsGrp>
+    <SumOfTotalLiabilitiesGrp><BOYAmt>1</BOYAmt><EOYAmt>10000</EOYAmt></SumOfTotalLiabilitiesGrp>
+    <NetAssetsOrFundBalancesGrp><BOYAmt>1</BOYAmt><EOYAmt>50000</EOYAmt></NetAssetsOrFundBalancesGrp>
+  </IRS990EZ></ReturnData>
+</Return>"""
+
+
+def test_990ez_finances():
+    filing, _, contractors = parse_return(EZ_RETURN.encode())
+    assert (filing["total_expenses"], filing["total_assets"], filing["total_liabilities"], filing["net_assets"]) == (
+        140000, 60000, 10000, 50000)
+    assert filing["mgmt_delegated"] is None and filing["mgmt_explanation"] is None and contractors == []

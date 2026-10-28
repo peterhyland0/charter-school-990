@@ -3,6 +3,7 @@
 from dagster import AssetCheckResult, AssetCheckSeverity, asset_check
 
 from .assets.bmf import bmf_candidates
+from .assets.extract import parsed_filings
 from .assets.ccd import ccd_schools
 from .assets.match import school_matches
 from .assets.returns import SELECT_LATEST, raw_returns
@@ -221,4 +222,38 @@ def umbrella_watch(pg: PostgresResource) -> AssetCheckResult:
         severity=AssetCheckSeverity.WARN,
         metadata={"suspects": "; ".join(f"{st} {name} ({leaid}): {n} schools, {k} operators"
                                         for st, name, leaid, n, k in suspects) or "none"},
+    )
+
+
+# Management companies the parser must name: (filer EIN, how, expected text).
+KNOWN_MANAGERS = [
+    ("650857507", "contractor", "ACADEMICA"),                       # Mater Academy Inc, managed by Academica
+    ("364629540", "explanation", "SUCCESS ACADEMY CHARTER SCHOOLS"),  # Success NYC, managed by its network
+]
+
+
+@asset_check(asset=parsed_filings, description="Known management companies are named by the contractor list or Schedule O.")
+def known_managers_named(pg: PostgresResource) -> AssetCheckResult:
+    problems = []
+    with pg.connect() as conn:
+        for ein, how, text in KNOWN_MANAGERS:
+            if how == "contractor":
+                sql = """SELECT count(*) FROM latest_filings f JOIN filing_contractors c USING (object_id)
+                         WHERE f.ein = %s AND c.is_management AND upper(c.name) LIKE %s"""
+            else:
+                sql = "SELECT count(*) FROM latest_filings WHERE ein = %s AND upper(mgmt_explanation) LIKE %s"
+            (n,) = conn.execute(sql, (ein, f"%{text}%")).fetchone()
+            if not n:
+                problems.append(f"{ein}: no {how} naming {text}")
+        named, delegating = conn.execute(
+            """SELECT count(*) FILTER (WHERE mgmt_explanation IS NOT NULL OR EXISTS (
+                          SELECT 1 FROM filing_contractors c WHERE c.object_id = f.object_id AND c.is_management)),
+                      count(*)
+               FROM latest_filings f WHERE mgmt_delegated"""
+        ).fetchone()
+    return AssetCheckResult(
+        passed=not problems,
+        severity=AssetCheckSeverity.WARN,
+        metadata={"problems": "; ".join(problems) or "none", "delegating_returns": delegating,
+                  "delegating_with_named_evidence": named},
     )

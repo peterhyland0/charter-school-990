@@ -4,10 +4,8 @@ What was decided, why, and what it costs. Numbers are from the current national 
 
 ## Data
 
-- **Every return is keyed on the IRS OBJECT_ID.** A nonprofit can file an original and an amended return for one year, so "latest" means the newest tax period, then the newest filing time.
-- **Each return is found by reading the zips' tables of contents, not the index's batch label.** May's label is wrong: returns labelled 05A sit in both the 05A and 05B zips.
-- **Single returns are read out of the IRS zips with HTTP range requests.** That fetches about 27,000 returns instead of downloading the full archive. May's zips use Deflate64, which Python can't decompress, so those are decompressed separately. *Cost:* reliance on an IRS host that rate-limits. Downloads fall back to the last cached copy.
-- **Both the 2025 and 2026 indexes are read,** because a nonprofit's newest return can be in either.
+- **Returns are keyed on the IRS OBJECT_ID**, so an amended return doesn't overwrite its original; "latest" is the newest tax period, then the newest filing.
+- **Each return is located by reading the zips' contents, not the index's batch label,** which is wrong for May (05A returns sit in two zips). Single returns are read with HTTP range requests, about 27,000 instead of the full archive, including May's Deflate64 zips. The 2025 and 2026 indexes are both read.
 - **Candidate nonprofits come from the IRS master file by two routes:**
   - **IRS school codes.**
   - **A network name matching a charter school or district,** such as KIPP or Great Hearts. Big networks often aren't coded as schools.
@@ -38,12 +36,20 @@ What was decided, why, and what it costs. Numbers are from the current national 
   - **The school lists its regular district's website.**
   - **A state where charters are district-run or government bodies by law.** Michigan's public school academies are governmental agencies (MCL 380.501).
 
+## Management companies and finances
+
+- **"Does a management company decide?" is answered from three places on the return, shown side by side:**
+  - the Part VI line 3 yes/no answer;
+  - any contractor in Part VII-B whose service is running schools;
+  - the Schedule O text explaining line 3.
+
+  Of returns that say yes, 96% name the manager in at least one place. Mater Academy's names Academica Dade LLC, an "educational service provider" paid $10.5M. A contractor counts by its service description; property, food, construction and investment management don't.
+- **Finances carry their line numbers, and each school says when the next return is due,** so June 2025 figures aren't presented as current.
+- **No public "suggest a match" button yet.** The site reads through a role that can't write. A suggestion box needs its own insert-only table, spam protection and a review step, so corrections stay with `make correct` for now.
+
 ## Corrections
 
-- **Hand fixes are stored in Postgres and applied last on every run,** so they win and survive reruns.
-  - Each school has at most one active answer, and each fix records a note and who made it.
-  - There is deliberately no foreign key to `schools`, which is reloaded every run.
-  - A Dagster check fails if a fix stops applying.
+- **Hand fixes are stored in Postgres and applied last on every run,** so they win and survive reruns. One active answer per school, each with a note and its author; a Dagster check fails if a fix stops applying.
 
 ## Stack
 
@@ -59,6 +65,6 @@ What was decided, why, and what it costs. Numbers are from the current national 
 
 - **Returns lag:** most cover a year ending June 2025.
 - **Low matching in Wisconsin (23%) and New Mexico (19%) is unexplained.** In Wisconsin, each district decides whether a charter is part of the district (Wis. Stat. 118.40(7)).
-- **Missed networks:** ones where each campus has its own website and the parent files elsewhere, such as Mater Academy in Florida.
+- **Missed networks:** ones where each campus has its own website and the parent files elsewhere. Most Mater Academy campuses in Florida are unmatched, though matched ones now show Academica as manager.
 - **Ambiguous schools** (KIPP NYC, Great Hearts) need a correction or more evidence, such as Schedule R and the contractor list.
 - **Accuracy is measured by spot checks only.**

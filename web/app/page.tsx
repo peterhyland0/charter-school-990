@@ -12,6 +12,7 @@ type Row = {
   is_operating: boolean;
   status: Status | null;
   nonprofits: string | null;
+  managers: string | null;
   total: string;
 };
 
@@ -61,6 +62,16 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
                  (SELECT string_agg(DISTINCT f.org_name, ' or ')
                     FROM school_matches m JOIN filings f ON f.object_id = m.object_id
                    WHERE m.ncessch = s.ncessch AND m.role = 'operator') AS nonprofits,
+                 -- Its management company: a management contractor on the
+                 -- operator's return, or else the linked management nonprofit.
+                 coalesce(
+                   (SELECT string_agg(DISTINCT c.name, ' and ')
+                      FROM school_matches m JOIN filing_contractors c ON c.object_id = m.object_id
+                     WHERE m.ncessch = s.ncessch AND m.role = 'operator' AND c.is_management),
+                   (SELECT string_agg(DISTINCT f.org_name, ' and ')
+                      FROM school_matches m JOIN filings f ON f.object_id = m.object_id
+                     WHERE m.ncessch = s.ncessch AND m.role = 'management')
+                 ) AS managers,
                  count(*) OVER () AS total
           FROM schools s
           LEFT JOIN school_status ss ON ss.ncessch = s.ncessch
@@ -119,6 +130,7 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
                 {!r.is_operating && " · not operating"}
                 {" · "}
                 {r.nonprofits ? `Run by ${r.nonprofits}` : "No nonprofit matched"}
+                {r.managers && ` · Managed by ${r.managers}`}
               </div>
             </li>
           ))}
