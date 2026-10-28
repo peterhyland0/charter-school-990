@@ -19,7 +19,14 @@ Four sources, each written to external_links (school, source, holder name, EIN):
   appended. Only used to bring the holder into the candidate pool: the
   district_name signal already compares it.
 
-Florida and California publish no holder names, so they have no source here.
+- website: the operator's legal name or EIN as the school's own website states
+  it (footer, privacy, donate pages), for unmatched schools (assets/websites.py).
+
+- fl_ag: the operating nonprofit named in each Florida charter school's audit
+  report, filed with the state Auditor General (assets/florida.py); fl_sunbiz:
+  Florida trade-name registrations, once their file is downloaded.
+
+California publishes no holder names, so it has no source here.
 
 The rows feed three steps: bmf_candidates adds each holder (by EIN, or by its
 exact name in the school's state) to the pool, so its return is fetched;
@@ -56,6 +63,7 @@ from ..settings import (
 )
 from ..util import GENERIC_WORDS, holder_names, name_key, street_key, zip5
 from .ccd import ccd_schools
+from .websites import website_rows
 
 log = logging.getLogger(__name__)
 EXT_DIR = RAW_DIR / "external"
@@ -283,7 +291,21 @@ def _az_rows(conn) -> list[tuple]:
     return rows
 
 
-LOADERS = {"fac": _fac_rows, "tx_tea": _tx_rows, "la_doe": _la_rows, "az_ccd": _az_rows}
+def _fl_ag_rows(conn) -> list[tuple]:
+    # florida.py uses this module's fetch() and _keys(), so it is imported here, not at the top.
+    from .florida import fl_ag_rows
+    return fl_ag_rows(conn)
+
+
+def _fl_sunbiz_rows(conn) -> list[tuple]:
+    # Needs ficdata.zip downloaded by hand (the state serves it over SFTP only);
+    # until then it raises and the source keeps its previous rows.
+    from .florida import fl_sunbiz_rows
+    return fl_sunbiz_rows(conn)
+
+
+LOADERS = {"fac": _fac_rows, "tx_tea": _tx_rows, "la_doe": _la_rows, "az_ccd": _az_rows, "website": website_rows,
+           "fl_ag": _fl_ag_rows, "fl_sunbiz": _fl_sunbiz_rows}
 
 
 @asset(group_name="pipeline", deps=[ccd_schools],

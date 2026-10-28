@@ -1,29 +1,40 @@
 """Link schools to the nonprofits that file their returns.
 
-Five signals are computed in SQL for every school and candidate nonprofit:
+These signals are computed in SQL for every school and candidate nonprofit:
 - website: the same registrable domain
 - name_zip: the same 5-digit ZIP and a similar name
 - name_city: the same state and city and a very similar name
+- name_state: the same state, another city, and a near-identical full name
+  (a school whose nonprofit's office is elsewhere in the state)
 - district_name: the school's charter district is named like the nonprofit
   (in many states the charter district is the legal nonprofit)
 - phone: the same 10-digit phone number
 - network_site: where a website can't identify one nonprofit (an umbrella site
   shared by many campus nonprofits, or the same site name on another ending),
   the in-state nonprofit on it whose name clearly matches the school's
+A website or phone shared with a nonprofit in another state only counts when
+the two names share a distinctive word: otherwise it is a management
+company's site or line (charterschoolsusa.com on a Louisiana school's return).
 
-A sixth, district_group, spreads a verified link across a charter district:
-the district is one legal nonprofit, so its schools share it.
+Two more spread links that the first pass found:
+- district_group: a verified link across a charter district: the district is
+  one legal nonprofit, so its schools share it
+- brand_group: a network's in-state operator to its other campuses, when
+  nearly all campuses with one operator share it and its name is in the
+  campus's (Somerset Academy Inc for each Florida Somerset campus)
 
 Two more come from outside the IRS data (assets/external.py):
 - audit: a federal single audit names this EIN as the auditee at the
   school's name and ZIP, city or street
-- holder: the state's charter-holder record (Texas, Louisiana) names a
-  holder whose name closely matches the nonprofit's
+- holder: a state or other holder record (Texas, Louisiana, Florida, the
+  school's own website) names a holder whose name closely matches the
+  nonprofit's, or gives the nonprofit's EIN
 
 A pair is verified when two or more independent signals agree and likely when
 one does. district_name and district_group both come from the school's
-district, so together they count once; audit compares names much as name_zip
-and name_city do, so it counts once with them.
+district, so together they count once; audit compares names much as name_zip,
+name_city and name_state do, so it counts once with them. brand_group is only
+added where no other signal links the pair, so it never verifies on its own.
 Among the nonprofits tied for a school's best tier, ordered rules decide which
 one runs the school and what the others are (management, support, affiliate).
 Hand corrections are applied last, so they always win and survive reruns.
@@ -36,9 +47,10 @@ from dagster import MaterializeResult, asset
 
 from ..resources import PostgresResource
 from ..settings import UMBRELLA_LEAIDS
-from ..util import EXCLUDED_DOMAINS, GENERIC_WORDS, US_STATES
+from ..util import EXCLUDED_DOMAINS, GENERIC_WORDS, NAME_STOPWORDS, US_STATES
 from .ccd import ccd_schools
 from .external import external_links
+from .governance import school_governance
 from .extract import parsed_filings
 
 # Tuned on a New York spot check: below these, name-only pairs were mostly wrong.
@@ -69,6 +81,22 @@ NETWORK_SITE_SIMILARITY = 0.6
 MIN_SITE_STEM = 6
 # holder: the state record's holder name against the filer's name.
 HOLDER_SIMILARITY = 0.8
+# external_links sources that name a school's holder. fl_ag, fl_sunbiz and
+# website are filled by their own assets and may be empty.
+HOLDER_SOURCES = ["tx_tea", "la_doe", "fl_ag", "fl_sunbiz", "website"]
+# name_state: with no shared ZIP or city, only a near-identical full name
+# (GARY MIDDLE COLLEGE against GARY MIDDLE COLLEGE INC) is evidence.
+NAME_STATE_SIMILARITY = 0.85
+# brand_group: a brand needs at least this many in-state campuses with one
+# clear operator, and this share of them run by the same nonprofit. Measured
+# on the first pass: Somerset (Florida) has 11 of 13, Pinecrest 6 of 6,
+# BridgePrep 8 of 8; Mater has 4 of 6 and doesn't qualify.
+BRAND_MIN_SIBLINGS = 3
+BRAND_SHARE = 0.8
+# A brand word that starts the names of campuses run by more than this many
+# other nonprofits in the state is a common word (LIBERTY, SUMMIT), not a
+# brand. No qualifying brand had more than one.
+BRAND_MAX_OTHER_OPERATORS = 2
 # An unmatched school's auditee that reports itself as local or state
 # government, files no 990, and is named like one is a government body.
 GOVERNMENT_NAME = (r"\m(CITY|TOWN|TOWNSHIP|VILLAGE|COUNTY|PARISH|BOROUGH|DISTRICT|ISD|USD|"
@@ -92,6 +120,16 @@ NUMS_AGREE = "(s.nums = '' OR f.nums = '' OR s.nums = f.nums)"
 # or its state ("TEXAS COLLEGE PREP") says nothing about which organisation it is.
 DISTINCTIVE = """(s.core <> coalesce(s.ucity, '') AND f.core <> coalesce(f.ucity, '')
     AND s.core NOT IN (SELECT core FROM states) AND f.core NOT IN (SELECT core FROM states))"""
+# A website or phone number shared with a nonprofit in another state is a
+# network's or management company's, so it only counts for a nonprofit whose
+# name shares a distinctive word with the school's (ROCKETSHIP for a Wisconsin
+# Rocketship campus, not SOUTH LOUISIANA CHARTER ACADEMY for Florida's
+# Renaissance campuses on charterschoolsusa.com). Of the 71 out-of-state
+# links this removed, none on inspection was the school's operator.
+SAME_STATE_OR_NAME = """(f.state = s.st OR EXISTS (
+    SELECT 1 FROM unnest(string_to_array(s.core, ' ')) AS w
+    WHERE length(w) >= 3 AND w !~ '^[0-9]+$'
+      AND w = ANY(string_to_array(f.core || ' ' || coalesce(f.dba_core, ''), ' '))))"""
 
 SETUP = [
     # Cities are compared in upper case: about a quarter of returns write them
@@ -105,10 +143,13 @@ SETUP = [
     "CREATE INDEX ON lf (phone10)",
     "CREATE INDEX ON lf (state, ucity)",
     "CREATE INDEX ON lf USING gin (core gin_trgm_ops)",
+    "CREATE INDEX ON lf USING gin (name_key gin_trgm_ops)",
     "ANALYZE lf",
     # Arizona's charter districts are their holders, named with the state's
     # entity ID appended ("Center for Academic Success Inc. (4191)") and
     # sometimes a DBA: compare the legal name, and the DBA as a second name.
+    # brand is the first word that could name a network, as util.first_word
+    # picks it (SOMERSET in SOMERSET ACADEMY SILVER PALMS).
     """CREATE TEMP TABLE ops ON COMMIT DROP AS
        SELECT *, name_core(name_key, %(generic)s) AS core,
               name_core(split_part(k.lea_key, ' DBA ', 1), %(generic)s) AS lea_core,
@@ -120,6 +161,11 @@ SETUP = [
            SELECT CASE WHEN lea_name ~ '\\(\\d+\\)\\s*$' THEN regexp_replace(lea_name_key, ' [0-9]+$', '')
                        ELSE lea_name_key END AS lea_key
        ) k
+       LEFT JOIN LATERAL (
+           SELECT w AS brand FROM unnest(string_to_array(name_key, ' ')) WITH ORDINALITY AS t(w, i)
+           WHERE length(w) >= 3 AND w !~ '^[0-9]+$' AND NOT (w = ANY(%(stopwords)s))
+           ORDER BY i LIMIT 1
+       ) b ON true
        WHERE is_operating""",
     """CREATE TEMP TABLE states ON COMMIT DROP AS
        SELECT code, name, name_core(name, %(generic)s) AS core
@@ -131,7 +177,7 @@ SETUP = [
 ]
 
 SIGNALS = {
-    "website": """
+    "website": f"""
         WITH umbrella AS (
             SELECT website_domain FROM lf WHERE website_domain IS NOT NULL
             GROUP BY 1 HAVING count(*) > %(umbrella_filers)s
@@ -143,6 +189,7 @@ SIGNALS = {
         WHERE NOT (s.website_domain = ANY(%(excluded)s))
           AND s.website_domain NOT IN (SELECT website_domain FROM umbrella)
           AND s.website_domain NOT IN (SELECT domain FROM district_domains)
+          AND {SAME_STATE_OR_NAME}
     """,
     # Summit Academies lists one site on 21 campus nonprofits, which is too many
     # for the website signal, and some schools list summitacademies.org where
@@ -199,6 +246,24 @@ SIGNALS = {
         {NAME_SIM}
         WHERE x.sim >= %(city_sim)s AND {NUMS_AGREE} AND {DISTINCTIVE}
     """,
+    # A nonprofit whose office is in another city of the school's state (a
+    # college's district-wide entity, a network's head office). Without a
+    # shared place the full names, generic words included, must be nearly
+    # identical, numbers included (SUCCESS ACADEMY CHARTER SCHOOL-NYC 6 is a
+    # campus of SUCCESS ACADEMY CHARTER SCHOOLS - NYC, not the same name), and
+    # so must their distinctive words: ACADEMIR PREPARATORY ACADEMY is not
+    # PREPARATORY ACADEMY INC, and two COMMUNITY CHARTER SCHOOLs in one state
+    # are different schools.
+    "name_state": f"""
+        INSERT INTO cand
+        SELECT s.ncessch, f.ein, f.object_id, 'name_state',
+               jsonb_build_object('school', s.sch_name, 'filing', f.org_name, 'school_city', s.lcity,
+                                  'filing_city', f.city, 'similarity', round(similarity(s.name_key, f.name_key)::numeric, 2))
+        FROM ops s JOIN lf f ON f.state = s.st AND f.name_key %% s.name_key
+        WHERE similarity(s.name_key, f.name_key) >= %(state_sim)s AND similarity(s.core, f.core) >= %(state_sim)s
+          AND f.ucity IS DISTINCT FROM s.ucity AND s.nums = f.nums AND {DISTINCTIVE}
+          AND EXISTS (SELECT 1 FROM unnest(string_to_array(s.core, ' ')) AS w WHERE NOT (w = ANY(%(generic)s)))
+    """,
     # Statewide umbrella districts are authorizers, not networks, so their
     # names say nothing about who runs a school. A district named for a
     # university (University of Texas University Charter School) matches the
@@ -234,7 +299,7 @@ SIGNALS = {
         INSERT INTO cand
         SELECT s.ncessch, f.ein, f.object_id, 'phone', jsonb_build_object('phone', s.phone10)
         FROM ops s JOIN lf f ON f.phone10 = s.phone10
-        WHERE {NUMS_AGREE} AND s.phone10 NOT IN (SELECT phone10 FROM shared)
+        WHERE {NUMS_AGREE} AND s.phone10 NOT IN (SELECT phone10 FROM shared) AND {SAME_STATE_OR_NAME}
     """,
     # A federal single audit filed under this EIN at the school's name and
     # place (matched in assets/external.py).
@@ -245,28 +310,44 @@ SIGNALS = {
         FROM external_links x JOIN ops s USING (ncessch) JOIN lf f ON f.ein = x.ein
         WHERE x.source = 'fac'
     """,
-    # The state's record of the charter's legal holder, against in-state filers.
+    # A record of the charter's legal holder (a state list, a Florida audit or
+    # trade name, the school's own website), against in-state filers by name,
+    # or against any filer by the EIN the record gives. One row per pair,
+    # preferring the EIN.
     "holder": """
         WITH h AS (
             SELECT DISTINCT x.ncessch, x.source, x.holder_name, s.st,
                    name_core(k, %(generic)s) AS core, name_nums(k) AS nums
             FROM external_links x JOIN ops s USING (ncessch), unnest(x.holder_keys) AS k
-            WHERE x.source IN ('tx_tea', 'la_doe')
+            WHERE x.source = ANY(%(holder_sources)s)
+        ),
+        by_name AS (
+            SELECT h.ncessch, f.ein, f.object_id, 2 AS pref, similarity(h.core, f.core) AS sim,
+                   jsonb_build_object('source', h.source, 'holder', h.holder_name, 'filing', f.org_name,
+                                      'similarity', round(similarity(h.core, f.core)::numeric, 2)) AS evidence
+            FROM h JOIN lf f ON f.state = h.st AND f.core %% h.core
+            WHERE h.core <> '' AND h.core NOT IN (SELECT core FROM states)
+              AND similarity(h.core, f.core) >= %(holder_sim)s
+              AND (h.nums = '' OR f.nums = '' OR h.nums = f.nums)
+              AND f.org_name !~* '\\mUNIVERSITY OF\\M'
+        ),
+        by_ein AS (
+            SELECT x.ncessch, f.ein, f.object_id, 1 AS pref, 1.0::real AS sim,
+                   jsonb_build_object('source', x.source, 'holder', x.holder_name, 'filing', f.org_name,
+                                      'ein', x.ein) AS evidence
+            FROM external_links x JOIN ops s USING (ncessch) JOIN lf f ON f.ein = x.ein
+            WHERE x.source = ANY(%(holder_sources)s)
         )
         INSERT INTO cand
-        SELECT h.ncessch, f.ein, f.object_id, 'holder',
-               jsonb_build_object('source', h.source, 'holder', h.holder_name, 'filing', f.org_name,
-                                  'similarity', round(similarity(h.core, f.core)::numeric, 2))
-        FROM h JOIN lf f ON f.state = h.st AND f.core %% h.core
-        WHERE h.core <> '' AND h.core NOT IN (SELECT core FROM states)
-          AND similarity(h.core, f.core) >= %(holder_sim)s
-          AND (h.nums = '' OR f.nums = '' OR h.nums = f.nums)
-          AND f.org_name !~* '\\mUNIVERSITY OF\\M'
+        SELECT DISTINCT ON (ncessch, ein) ncessch, ein, object_id, 'holder', evidence
+        FROM (SELECT * FROM by_ein UNION ALL SELECT * FROM by_name) z
+        ORDER BY ncessch, ein, pref, sim DESC
     """,
 }
 
-# Pairs and their tiers from the candidate signals. Run twice: once for the
-# five direct signals, then again after district_group is added. Hand
+# Pairs and their tiers from the candidate signals. Run three times: once for
+# the direct signals, again after district_group is added, and again after
+# brand_group. Hand
 # corrections that remove a link go first, so the removed nonprofit neither
 # spreads across a district nor takes part in deciding roles.
 BUILD_PAIRS = [
@@ -290,7 +371,8 @@ BUILD_PAIRS = [
     # Independent evidence: the two district signals count as one.
     """UPDATE pairs SET strength = (
            SELECT count(DISTINCT CASE WHEN x IN ('district_name', 'district_group') THEN 'district'
-                                      WHEN x IN ('name_zip', 'name_city', 'audit') THEN 'name' ELSE x END)
+                                      WHEN x IN ('name_zip', 'name_city', 'name_state', 'audit') THEN 'name'
+                                      ELSE x END)
            FROM unnest(signals) AS x)""",
 ]
 
@@ -318,10 +400,62 @@ DISTRICT_GROUP = """
     WHERE v.n - coalesce(own.self, 0) >= 1
 """
 
+# A network's campuses often each have their own website, so nothing links a
+# campus to the nonprofit that runs its siblings. Where at least
+# BRAND_MIN_SIBLINGS in-state campuses of a brand (the first word that could
+# name a network) have one clear operator after the first pass, and
+# BRAND_SHARE of them share it, that operator is linked to the brand's other
+# campuses. The brand mustn't be a word of a state's name, or the town one of
+# its campuses is in (AUSTIN ACHIEVE in Austin names a place; PINECREST
+# ACADEMY's campuses are elsewhere than the village of Pinecrest), or start
+# the names of campuses run by more than BRAND_MAX_OTHER_OPERATORS other
+# nonprofits. The operator must file in the state, not be a support entity,
+# have the brand word in its name or DBA, and its whole distinctive name must
+# be in the campus's: CORAL ACADEMY OF SCIENCE LAS VEGAS is not linked to
+# Reno's Coral Academy campuses, which have their own nonprofit, and
+# SHERMAN THOMAS CHARTER SCHOOLS not to Sherman Oaks Elementary. Only pairs no
+# other signal found are added, so brand_group never verifies a link; it is
+# indirect, so direct evidence for another nonprofit beats it.
+BRAND_GROUP = """
+    WITH single AS (
+        SELECT ncessch, min(ein) AS ein FROM r WHERE role = 'operator'
+        GROUP BY 1 HAVING count(*) = 1
+    ),
+    brands AS (
+        SELECT s.st, s.brand, x.ein, count(*) AS n,
+               sum(count(*)) OVER b AS siblings, count(*) OVER b AS operators,
+               row_number() OVER (PARTITION BY s.st, s.brand ORDER BY count(*) DESC, x.ein) AS pos
+        FROM single x JOIN ops s USING (ncessch)
+        WHERE s.brand IS NOT NULL
+        GROUP BY 1, 2, 3
+        WINDOW b AS (PARTITION BY s.st, s.brand)
+    ),
+    dominant AS (
+        SELECT b.st, b.brand, b.siblings, b.n, f.ein, f.object_id, f.org_name, f.nums, f.core, f.dba_core
+        FROM brands b JOIN lf f ON f.ein = b.ein
+        WHERE b.pos = 1 AND b.siblings >= %(brand_min)s AND b.n >= %(brand_share)s * b.siblings
+          AND b.operators - 1 <= %(brand_max_others)s
+          AND f.state = b.st AND f.org_name !~* %(support_name)s
+          AND b.brand = ANY(string_to_array(f.name_key || ' ' || coalesce(f.dba_key, ''), ' '))
+          AND NOT EXISTS (SELECT 1 FROM states x WHERE b.brand = ANY(string_to_array(x.name, ' ')))
+          AND NOT EXISTS (SELECT 1 FROM ops c WHERE c.st = b.st AND c.brand = b.brand AND c.ucity = b.brand)
+    )
+    INSERT INTO cand
+    SELECT s.ncessch, d.ein, d.object_id, 'brand_group',
+           jsonb_build_object('brand', d.brand, 'filing', d.org_name, 'campuses', d.n, 'siblings', d.siblings)
+    FROM ops s JOIN dominant d ON d.st = s.st AND d.brand = s.brand
+    WHERE (s.nums = '' OR d.nums = '' OR s.nums = d.nums)
+      AND (string_to_array(d.core, ' ') <@ string_to_array(s.name_key, ' ')
+           OR string_to_array(d.dba_core, ' ') <@ string_to_array(s.name_key, ' '))
+      AND NOT EXISTS (SELECT 1 FROM pairs p WHERE p.ncessch = s.ncessch AND p.ein = d.ein)
+"""
+
 # Role facts for every pair, then ordered rules among the pairs tied for each
 # school's best tier. Each rule only sets pairs aside when some tied pair
-# survives it, so a school never loses its last candidate.
+# survives it, so a school never loses its last candidate. Run twice: the
+# first pass's operators feed brand_group.
 ROLES = [
+    "DROP TABLE IF EXISTS r, home",
     """CREATE TEMP TABLE r ON COMMIT DROP AS
         SELECT p.*, CASE WHEN p.strength >= 2 THEN 'verified' ELSE 'likely' END AS tier,
                p.strength >= 2 AS strong,
@@ -385,6 +519,9 @@ ROLES = [
        FROM decided d
        WHERE r.ncessch = d.ncessch AND r.role IS NULL AND r.ein <> d.ein""",
     "UPDATE r SET role = 'operator' WHERE role IS NULL",
+]
+
+SAVE_ROLES = [
     """INSERT INTO school_matches (ncessch, ein, object_id, method, tier, evidence, signals, ambiguous, role, source)
        SELECT ncessch, ein, object_id, 'signals', tier, evidence, signals,
               count(*) FILTER (WHERE role = 'operator') OVER (PARTITION BY ncessch) > 1, role, 'auto'
@@ -432,6 +569,8 @@ BUILD_STATUS = """
                WHEN pf.filing_req_cd IN ('00', '06', '07', '13', '14') THEN 'not_required_to_file'
                WHEN pf.ein IS NOT NULL THEN 'no_recent_return'
                WHEN pb.law IS NOT NULL THEN 'public_body_state'
+               -- A state record says its district or a state body runs it.
+               WHEN gv.governance IS NOT NULL THEN 'district_run_charter'
                WHEN ga.ein IS NOT NULL THEN 'government_auditee'
                -- The school's own site is its regular district's: probably
                -- run by the district, with no separate nonprofit.
@@ -443,6 +582,7 @@ BUILD_STATUS = """
                'has_website', s.website_domain IS NOT NULL,
                'nonprofit_ein', pf.ein, 'nonprofit_name', pf.name, 'filing_req_cd', pf.filing_req_cd,
                'correction_note', c.note, 'state_law', pb.law,
+               'governance_source', gv.source, 'governance', gv.governance,
                'auditee_name', ga.holder_name, 'auditee_ein', ga.ein)),
            EXISTS (SELECT 1 FROM corr x WHERE x.ncessch = s.ncessch)
     FROM ops s
@@ -453,6 +593,13 @@ BUILD_STATUS = """
     ) m USING (ncessch)
     LEFT JOIN corr c ON c.ncessch = s.ncessch AND c.action = 'none'
     LEFT JOIN unnest(%(public_body_codes)s::text[], %(public_body_laws)s::text[]) AS pb(code, law) ON pb.code = s.st
+    LEFT JOIN LATERAL (
+        -- school_governance (assets/governance.py): district_run before state_agency.
+        SELECT g.source, g.governance FROM school_governance g
+        WHERE m.best IS NULL AND g.ncessch = s.ncessch AND g.governance IN ('district_run', 'state_agency')
+        ORDER BY g.governance, g.source
+        LIMIT 1
+    ) gv ON true
     LEFT JOIN LATERAL (
         -- Audited as part of a city, county or school district that files no 990.
         SELECT x.ein, x.holder_name FROM external_links x
@@ -493,10 +640,16 @@ PARAMS = {
     "public_body_laws": list(PUBLIC_BODY_STATES.values()),
     "support_name": SUPPORT_NAME,
     "name_margin": NAME_TIE_MARGIN,
-    "indirect": ["district_name", "district_group", "audit"],
+    "indirect": ["district_name", "district_group", "audit", "brand_group"],
     "site_sim": NETWORK_SITE_SIMILARITY,
     "min_stem": MIN_SITE_STEM,
     "holder_sim": HOLDER_SIMILARITY,
+    "holder_sources": HOLDER_SOURCES,
+    "state_sim": NAME_STATE_SIMILARITY,
+    "stopwords": sorted(NAME_STOPWORDS),
+    "brand_min": BRAND_MIN_SIBLINGS,
+    "brand_share": BRAND_SHARE,
+    "brand_max_others": BRAND_MAX_OTHER_OPERATORS,
     "government_name": GOVERNMENT_NAME,
 }
 
@@ -507,7 +660,7 @@ def _run(conn, statements) -> None:
         conn.execute(sql, PARAMS if "%(" in sql else None)
 
 
-@asset(group_name="pipeline", deps=[ccd_schools, parsed_filings, external_links], description="School-to-nonprofit links from eight signals, each nonprofit's role, hand corrections, and a status for every school.")
+@asset(group_name="pipeline", deps=[ccd_schools, parsed_filings, external_links, school_governance], description="School-to-nonprofit links from eleven signals, each nonprofit's role, hand corrections, and a status for every school.")
 def school_matches(pg: PostgresResource) -> MaterializeResult:
     with pg.connect() as conn:
         # DELETE, not TRUNCATE: the live site keeps showing the previous matches
@@ -515,7 +668,8 @@ def school_matches(pg: PostgresResource) -> MaterializeResult:
         conn.execute("DELETE FROM school_matches")
         conn.execute("DELETE FROM school_status")
         _run(conn, SETUP)
-        # Lets the gin index serve the district-name % (similarity) operator.
+        # Lets the gin indexes serve the % (similarity) operator in the
+        # district_name, name_state and holder signals.
         conn.execute(f"SET LOCAL pg_trgm.similarity_threshold = {DISTRICT_NAME_SIMILARITY}")
         signal_rows = {}
         for name, sql in SIGNALS.items():
@@ -524,6 +678,10 @@ def school_matches(pg: PostgresResource) -> MaterializeResult:
         signal_rows["district_group"] = conn.execute(DISTRICT_GROUP, PARAMS).rowcount
         _run(conn, BUILD_PAIRS)
         _run(conn, ROLES)
+        signal_rows["brand_group"] = conn.execute(BRAND_GROUP, PARAMS).rowcount
+        _run(conn, BUILD_PAIRS)
+        _run(conn, ROLES)
+        _run(conn, SAVE_ROLES)
         _run(conn, LINK_CORRECTIONS)
         conn.execute(BUILD_STATUS, PARAMS)
 

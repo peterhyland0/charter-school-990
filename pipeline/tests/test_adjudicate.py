@@ -16,6 +16,7 @@ from charter990.assets.adjudicate import (
     jev_state,
     option_key,
     mark_largest_revenue,
+    picks,
     rationale,
     schedule_o_names_school,
     score,
@@ -184,6 +185,37 @@ def test_call_jev_records_the_version_that_answered(monkeypatch):
     (chosen, conf, reason), version, tokens = call_jev({"school": {}}, jev_questions(rows), rows)
     assert (chosen, conf, version, tokens) == ("273430689", 0.81, "jev-1.14.0", 900)
     assert "same phone" in reason
+
+
+def test_picks_apply_one_method_or_where_both_agree():
+    keys = [("ambiguous", "A"), ("unmatched", "B"), ("unmatched", "C"), ("unmatched", "D"), ("ambiguous", "E")]
+    current = {
+        # Both pick the same nonprofit.
+        ("scored", "A"): ("111111111", 0.8, "scores 6", "scored-v1"),
+        ("jev", "A"): ("111111111", 0.72, "Jev puts 90%", "jev-1.14.0"),
+        # They disagree.
+        ("scored", "B"): ("222222222", 0.7, "scores 5", "scored-v1"),
+        ("jev", "B"): ("333333333", 0.65, "Jev puts 80%", "jev-1.14.0"),
+        # Jev passes.
+        ("scored", "C"): ("444444444", 0.6, "scores 5", "scored-v1"),
+        ("jev", "C"): (None, 0.5, "None: Jev puts 50%", "jev-1.14.0"),
+        # No Jev decision about the current inputs.
+        ("scored", "D"): ("555555555", 0.9, "scores 8", "scored-v1"),
+        # Both pass.
+        ("scored", "E"): (None, 0.3, "leads by only", "scored-v1"),
+        ("jev", "E"): (None, 0.4, "None", "jev-1.14.0"),
+    }
+    assert picks("both", keys, current) == [("A", "111111111", "ambiguous", {
+        "method": "both",
+        "scored": {"model": "scored-v1", "confidence": 0.8, "reason": "scores 6"},
+        "jev": {"model": "jev-1.14.0", "confidence": 0.72, "reason": "Jev puts 90%"},
+    })]
+    assert [p[:2] for p in picks("scored", keys, current)] == [
+        ("A", "111111111"), ("B", "222222222"), ("C", "444444444"), ("D", "555555555")]
+    assert [p[:2] for p in picks("jev", keys, current)] == [("A", "111111111"), ("B", "333333333")]
+    # One method: its decision, flat, as before.
+    assert picks("jev", keys, current)[1][3] == {
+        "method": "jev", "model": "jev-1.14.0", "confidence": 0.65, "reason": "Jev puts 80%"}
 
 
 def test_jev_env(monkeypatch):

@@ -22,11 +22,14 @@ Every candidate gets the same features, and both models see all of them:
   the question, so a rerun asks only about new or changed cases.
 
 Shadow mode: decisions go to the adjudications table only. With
-ADJUDICATOR=scored or ADJUDICATOR=jev, that method's picks are applied:
-an ambiguous school's pick becomes its operator and the other tied operators
-become related; an unmatched school's pick is linked as likely, with signal
-adjudicated. Hand corrections always win. Applied picks are undone at the
-start of every run, so unsetting ADJUDICATOR restores the matcher's answer.
+ADJUDICATOR=scored or ADJUDICATOR=jev, that method's picks are applied; with
+ADJUDICATOR=both, only the picks where the scored model and Jev chose the same
+nonprofit for the school's current evidence (source consensus, and the
+evidence keeps both decisions). An ambiguous school's pick becomes its
+operator and the other tied operators become related; an unmatched school's
+pick is linked as likely, with signal adjudicated. Hand corrections always
+win. Applied picks are undone at the start of every run, so unsetting
+ADJUDICATOR restores the matcher's answer.
 """
 
 from __future__ import annotations
@@ -46,8 +49,9 @@ from ..resources import PostgresResource
 from ..util import is_support_org, name_key, named_in, street_key
 from .match import PARAMS, SETUP, school_matches
 
-# Unmatched schools in these states are left alone: by law most have no nonprofit.
-OUT_OF_SCOPE_REASONS = ["district_governed_state", "public_body_state", "corrected_none"]
+# Unmatched schools left alone: by state law, or by state records saying the
+# district or the state runs them (assets/governance.py), most have no nonprofit.
+OUT_OF_SCOPE_REASONS = ["district_governed_state", "public_body_state", "corrected_none", "district_run_charter"]
 # Unmatched-school candidates.
 CANDIDATE_NAME_SIMILARITY = 0.3
 CANDIDATE_ZIP_SIMILARITY = 0.2
@@ -223,8 +227,14 @@ REVERT = [
        WHERE evidence ? 'adjudicated' OR evidence ? 'adjudication_demoted'""",
 ]
 
-# Apply picks (adj_picks: ncessch, ein, scope, confidence, reason). Schools
-# with an active hand correction are skipped, and never to an unlinked nonprofit.
+# What ADJUDICATOR applies: the methods whose picks must agree, and the
+# source the applied match is marked with.
+APPLIED_METHODS = {"scored": ("scored",), "jev": ("jev",), "both": ("scored", "jev")}
+APPLIED_SOURCE = {"scored": "model", "jev": "jev", "both": "consensus"}
+
+# Apply picks (adj_picks: ncessch, ein, scope, adjudicated, the decision as the
+# evidence records it). Schools with an active hand correction are skipped,
+# and never to an unlinked nonprofit.
 NOT_CORRECTED = """NOT EXISTS (SELECT 1 FROM match_corrections c
                                WHERE c.ncessch = p.ncessch AND c.retired_at IS NULL
                                  AND (c.action IN ('link', 'none') OR c.ein = p.ein))"""
@@ -233,8 +243,7 @@ APPLY = [
         SET role = CASE WHEN m.ein = p.ein THEN 'operator' ELSE 'related' END,
             source = CASE WHEN m.ein = p.ein THEN %(source)s::text ELSE m.source END,
             evidence = m.evidence || CASE
-                WHEN m.ein = p.ein THEN jsonb_build_object('adjudicated', jsonb_build_object(
-                    'method', %(method)s::text, 'model', p.model, 'confidence', p.confidence, 'reason', p.reason))
+                WHEN m.ein = p.ein THEN jsonb_build_object('adjudicated', p.adjudicated)
                 ELSE jsonb_build_object('adjudication_demoted', jsonb_build_object('method', %(method)s::text, 'chosen', p.ein))
             END
         FROM adj_picks p
@@ -245,8 +254,7 @@ APPLY = [
     f"""WITH ins AS (
             INSERT INTO school_matches (ncessch, ein, object_id, method, tier, evidence, signals, ambiguous, role, source)
             SELECT p.ncessch, p.ein, f.object_id, 'adjudicated', 'likely',
-                   jsonb_build_object('adjudicated', jsonb_build_object(
-                       'method', %(method)s::text, 'model', p.model, 'confidence', p.confidence, 'reason', p.reason)),
+                   jsonb_build_object('adjudicated', p.adjudicated),
                    ARRAY['adjudicated'], false, 'operator', %(source)s::text
             FROM adj_picks p JOIN latest_filings f ON f.ein = p.ein
             JOIN school_status st ON st.ncessch = p.ncessch AND st.status = 'unmatched'
@@ -555,6 +563,32 @@ def call_jev(state: dict, questions: dict, rows: list[dict]):
 
 
 # ----------------------------------------------------------------------------
+# What gets applied.
+
+
+def picks(applying: str, keys, current: dict) -> list[tuple[str, str, str, dict]]:
+    """(ncessch, chosen EIN, scope, what the evidence records) for each school
+    every method in APPLIED_METHODS[applying] picked the same EIN for.
+
+    keys: (scope, ncessch) of the schools in scope. current: (method, ncessch)
+    -> (chosen, confidence, reason, model), the decisions about the school's
+    current inputs. With both, a school either method passed on, or has no
+    decision from, is left as the matcher had it.
+    """
+    out = []
+    for scope, ncessch in keys:
+        decisions = {m: current.get((m, ncessch)) for m in APPLIED_METHODS[applying]}
+        chosen = {d[0] if d else None for d in decisions.values()}
+        if len(chosen) != 1 or None in chosen:
+            continue
+        each = {m: {"model": d[3], "confidence": d[1], "reason": d[2]} for m, d in decisions.items()}
+        # One method: its decision, flat. Both: each method's under its name.
+        record = {"method": applying, **(each if applying == "both" else each[applying])}
+        out.append((ncessch, chosen.pop(), scope, record))
+    return out
+
+
+# ----------------------------------------------------------------------------
 
 FACT_KEYS = (
     "scope", "ncessch", "ein", "signals",
@@ -632,12 +666,12 @@ UPSERT = """
     group_name="pipeline",
     deps=[school_matches],
     description="Decisions for ambiguous and unmatched schools by a scored model and by Jev, from the same "
-                "evidence. Shadow mode unless ADJUDICATOR=scored|jev.",
+                "evidence. Shadow mode unless ADJUDICATOR=scored|jev, or both for the picks the two agree on.",
 )
 def adjudications(pg: PostgresResource) -> MaterializeResult:
     applying = (os.environ.get("ADJUDICATOR") or "").strip().lower() or None
-    if applying not in (None, "scored", "jev"):
-        raise ValueError(f"ADJUDICATOR must be scored or jev, not {applying!r}")
+    if applying not in (None, *APPLIED_METHODS):
+        raise ValueError(f"ADJUDICATOR must be scored, jev or both, not {applying!r}")
 
     with pg.connect() as conn:
         with conn.transaction(force_rollback=True):
@@ -746,20 +780,12 @@ def adjudications(pg: PostgresResource) -> MaterializeResult:
 
         applied = Counter()
         if applying:
-            picks = [
-                (ncessch, chosen, scope, conf, reason, model)
-                for (scope, ncessch) in cases
-                for chosen, conf, reason, model in [current.get((applying, ncessch), (None, 0, "", ""))]
-                if chosen
-            ]
             conn.execute(
-                "CREATE TEMP TABLE adj_picks (ncessch text, ein text, scope text, confidence real, reason text, "
-                "model text) "
-                "ON COMMIT DROP")
+                "CREATE TEMP TABLE adj_picks (ncessch text, ein text, scope text, adjudicated jsonb) ON COMMIT DROP")
             with conn.cursor() as cur, cur.copy("COPY adj_picks FROM STDIN") as copy:
-                for row in picks:
-                    copy.write_row(row)
-            params = {"method": applying, "source": "model" if applying == "scored" else "jev"}
+                for ncessch, ein, scope, record in picks(applying, cases, current):
+                    copy.write_row((ncessch, ein, scope, json.dumps(record)))
+            params = {"method": applying, "source": APPLIED_SOURCE[applying]}
             for sql in APPLY:
                 conn.execute(sql, params)
             applied = Counter(dict(conn.execute(
@@ -780,6 +806,8 @@ def adjudications(pg: PostgresResource) -> MaterializeResult:
         jev_decided = [current.get(("jev", k[1])) for k in keys]
         meta[f"jev_{scope_name}_decided"] = sum(1 for d in jev_decided if d)
         meta[f"jev_{scope_name}_picked"] = sum(1 for d in jev_decided if d and d[0])
+        # What ADJUDICATOR=both would apply, before hand corrections.
+        meta[f"both_{scope_name}_agree"] = len(picks("both", keys, current))
         for name in FLAG_FEATURES:
             meta[f"feature_{scope_name}_{name}"] = sum(1 for r in rows if r["features"][name])
         if applying:

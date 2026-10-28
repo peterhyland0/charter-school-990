@@ -21,7 +21,9 @@ export const SIGNAL_LABEL: Record<string, string> = {
   district_group: "Same charter district",
   network_site: "Network website and name",
   audit: "Federal single audit",
-  holder: "State charter-holder record",
+  holder: "Charter-holder record (state, Florida audit or school website)",
+  brand_group: "Same network in the state",
+  name_state: "Same name, same state",
   adjudicated: "Adjudicated",
 };
 
@@ -44,6 +46,8 @@ type Detail = {
   correction_note?: string;
   state_law?: string;
   auditee_name?: string;
+  governance?: string;
+  governance_source?: string;
   auditee_ein?: string;
 };
 
@@ -62,6 +66,14 @@ export function reasonText(reason: string | null, detail: Detail): string {
       return `A nonprofit with a matching name and ZIP, ${nonprofit}, normally files a Form 990, but none was published in 2025 or 2026. Its return may be late or not yet released.`;
     case "public_body_state":
       return `Charter schools in this state are government bodies under state law (${detail.state_law ?? "state statute"}), not nonprofits, so most have no Form 990 to find.`;
+    case "district_run_charter":
+      if (detail.governance === "state_agency")
+        return "State law makes this charter school an entity of the state, not a nonprofit (Hawaii, HRS 302D-25), so it has no Form 990 to find.";
+      if (detail.governance_source === "ca_cde")
+        return "California funds this charter through its school district (locally funded), which usually means the district runs it, so there is probably no separate nonprofit.";
+      if (detail.governance_source === "wi_dpi")
+        return "Wisconsin lists this as a district-authorized charter; most of these are run by the district itself, so there is probably no separate nonprofit.";
+      return "State records list this charter school as run by its school district, so there is usually no separate nonprofit to find.";
     case "government_auditee":
       return `This school's federal single audit is filed by ${detail.auditee_name ?? "a government body"}, a city, county or school district that files no Form 990, so it is probably run by that government rather than a nonprofit.`;
     case "uses_district_website":

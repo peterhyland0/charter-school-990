@@ -7,6 +7,7 @@ from .assets.bmf import bmf_candidates
 from .assets.ccd import ccd_schools
 from .assets.external import external_links
 from .assets.extract import parsed_filings
+from .assets.governance import school_governance
 from .assets.irs_index import irs_index
 from .assets.match import school_matches
 from .assets.related import related_links, related_orgs
@@ -44,7 +45,7 @@ monthly_refresh = ScheduleDefinition(
 )
 
 defs = Definitions(
-    assets=[ccd_schools, external_links, bmf_candidates, irs_index, zip_members, raw_returns, parsed_filings, school_matches,
+    assets=[ccd_schools, external_links, school_governance, bmf_candidates, irs_index, zip_members, raw_returns, parsed_filings, school_matches,
             adjudications, related_orgs, related_links],
     asset_checks=[
         operating_school_count,
