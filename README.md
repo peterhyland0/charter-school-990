@@ -5,12 +5,14 @@ its IRS Form 990, and extracts who leads it, what they are paid, its finances, a
 whether a management company runs it. Every fact links to the filing it came from,
 and the pipeline refreshes as the IRS posts new e-file batches.
 
-Status: phase 2. Every state. Schools are matched to filers by website, name and ZIP,
-name and city, charter district name, phone, and verified schools in the same charter
-district; each school is verified, likely or unmatched with a reason. Among the
-nonprofits linked to a school, ordered rules decide which one runs it and which is its
-management organization, a support entity or the same network in another state. Hand
-corrections override the matcher and survive every rerun. Running locally.
+Status: live. The lookup site runs on Vercel against a Neon Postgres database,
+covering every state. Schools are matched to filers by website, name and ZIP, name and
+city, charter district name, phone, a network website shared by campus nonprofits, and
+verified schools in the same charter district. Each school is verified, likely or
+unmatched with a reason. Among the nonprofits linked to a school, ordered rules decide
+which one runs it and which is its management organization, a support entity or the
+same network in another state. Hand corrections override the matcher and survive
+every rerun. The monthly scheduler is built and ready to deploy.
 
 Why it is built this way: [docs/decisions.md](docs/decisions.md).
 
@@ -37,12 +39,12 @@ The same code runs live; only `DATABASE_URL` changes.
 - **Website:** Vercel, deployed from this repo with Root Directory `web`.
   `DATABASE_URL` is Neon's pooled connection string for a read-only `web_reader` role
   (`make neon-roles`). Every push to `main` redeploys.
-- **Pipeline:** packaged for a small Ubuntu server (`deploy/setup.sh`), not yet
-  running there. It would run a Dagster webserver bound to localhost, and a daemon
-  that runs `monthly_refresh` at 06:00 UTC on the 3rd. The schedule is on only where
-  `CHARTER990_SCHEDULE=on`. You'd reach the UI with
-  `ssh -L 3070:localhost:3070 root@<server>`. Until then, `make pipeline` with
-  `DATABASE_URL` pointing at Neon does the same refresh.
+- **Pipeline:** ready to deploy to a small Ubuntu server with `deploy/setup.sh`: a
+  Dagster webserver bound to localhost, and a daemon that runs `monthly_refresh` at
+  06:00 UTC on the 3rd of each month. The schedule is on only where
+  `CHARTER990_SCHEDULE=on`. Reach the UI with `ssh -L 3070:localhost:3070 root@<server>`.
+  Until the server is up, `DATABASE_URL=<Neon> make pipeline` runs the same refresh
+  by hand.
 
 Copy `.env.neon.example` to `.env.neon` for the `neon-*` targets. Add `NEON=1` to a
 correction command to fix a match in the live database.

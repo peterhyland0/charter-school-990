@@ -50,7 +50,7 @@ What was decided, why, and what it costs. Numbers are from the current national 
 - **Python and Dagster, Postgres, and Next.js with TypeScript,** as in the job description, hosted on Neon and Vercel. Dagster provides reruns, 9 loud checks and a monthly schedule. A rerun fetches only returns it hasn't seen.
 - **Live layout:**
   - **Neon and Vercel** are both in US East, for fast pages.
-  - **The monthly Dagster job** is packaged for a small EU server (`deploy/`), which isn't running yet. That costs a fraction of a US server, and its SQL runs inside Neon either way.
+  - **The monthly Dagster job is ready to deploy** to a small EU server (`deploy/setup.sh`, systemd units, the schedule switched on by one setting). That costs a fraction of a US server, and its SQL runs inside Neon either way.
   - **A run never empties the live site:** schools are synced in place and matches are replaced in one transaction.
   - **The website** reads as a read-only role.
   - **The Dagster UI** has no login, so it is reachable only over SSH.
