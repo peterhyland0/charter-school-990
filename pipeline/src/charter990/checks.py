@@ -1,5 +1,8 @@
 """Checks that fail loudly when the numbers look wrong."""
 
+import re
+from collections import Counter
+
 from dagster import AssetCheckResult, AssetCheckSeverity, asset_check
 
 from .assets.bmf import bmf_candidates
@@ -32,7 +35,19 @@ KNOWN_NETWORK_EINS = {
     "454306715": "Great Hearts America",
 }
 MAX_FAILURE_RATE = 0.05
+# No return fails to parse today, so even a few in a hundred means the format changed.
+MAX_PARSE_FAILURE_RATE = 0.01
 MIN_MATCH_RATE = 0.5
+# Fields the matcher and the role rules read from each return. When the IRS
+# renames or moves one in a new schema version, it comes back empty on every
+# return filed under that version, with no parse error.
+DRIFT_FIELDS = ("org_name", "city", "state", "zip5", "phone10", "website", "mgmt_delegated")
+# The 990-EZ doesn't ask whether management was delegated.
+NOT_ON_EZ = {"mgmt_delegated"}
+# Empty rates already differ by up to 35 points between versions (phone on one
+# 990-EZ version), while a renamed field is empty on nearly every return.
+MAX_EMPTY_JUMP = 0.5
+MIN_VERSION_RETURNS = 50
 # Role expectations for known networks: (school website, state, EIN, expected role).
 KNOWN_ROLES = [
     ("ideapublicschools.org", "TX", "742948339", "operator"),       # IDEA Public Schools
@@ -114,6 +129,72 @@ def fetch_failure_rate(pg: PostgresResource) -> AssetCheckResult:
         (total,) = conn.execute(f"SELECT count(*) FROM ({SELECT_LATEST}) s").fetchone()
     rate = failed / total if total else 0.0
     return AssetCheckResult(passed=rate <= MAX_FAILURE_RATE, metadata={"failed": failed, "selected": total, "rate": round(rate, 4)})
+
+
+@asset_check(asset=parsed_filings, description="At most 1% of fetched returns failed to parse.")
+def parse_failure_rate(pg: PostgresResource) -> AssetCheckResult:
+    with pg.connect() as conn:
+        (failed,) = conn.execute("SELECT count(*) FROM load_errors WHERE stage = 'parse'").fetchone()
+        # A return that parsed under an older parser and now fails keeps its old row.
+        (total,) = conn.execute(
+            "SELECT count(*) FROM (SELECT object_id FROM filings UNION SELECT key FROM load_errors WHERE stage = 'parse') x"
+        ).fetchone()
+        common = conn.execute(
+            "SELECT left(error, 100), count(*) FROM load_errors WHERE stage = 'parse' GROUP BY 1 ORDER BY 2 DESC LIMIT 3"
+        ).fetchall()
+    rate = failed / total if total else 0.0
+    return AssetCheckResult(
+        passed=rate <= MAX_PARSE_FAILURE_RATE,
+        metadata={"failed": failed, "attempted": total, "rate": round(rate, 4),
+                  "common_errors": "; ".join(f"{n} x {e}" for e, n in common) or "none"},
+    )
+
+
+def version_key(version: str | None) -> tuple[int, int, int]:
+    """Order schema versions such as 2024v5.2. A missing or unknown version
+    sorts last, so it is compared with all the others."""
+    m = re.fullmatch(r"(\d{4})v(\d+)\.(\d+)", version or "")
+    return tuple(int(g) for g in m.groups()) if m else (9999, 0, 0)
+
+
+def empty_rate_jumps(rows: list[tuple[str, str | None, int, dict[str, int]]]) -> list[tuple[str, str | None, str, float, float]]:
+    """Fields empty far more often on one schema version than on all earlier
+    versions of the same form together.
+
+    rows: (return type, version, returns, empty count per field).
+    Returns (return type, version, field, empty rate, earlier empty rate).
+    """
+    jumps = []
+    for return_type in sorted({r[0] for r in rows}):
+        fields = [f for f in DRIFT_FIELDS if not (return_type == "990EZ" and f in NOT_ON_EZ)]
+        seen, seen_empty = 0, Counter()
+        for _, version, n, empty in sorted((r for r in rows if r[0] == return_type), key=lambda r: version_key(r[1])):
+            if n >= MIN_VERSION_RETURNS and seen >= MIN_VERSION_RETURNS:
+                for f in fields:
+                    rate, earlier = empty[f] / n, seen_empty[f] / seen
+                    if rate - earlier >= MAX_EMPTY_JUMP:
+                        jumps.append((return_type, version, f, rate, earlier))
+            seen += n
+            seen_empty.update(empty)
+    return jumps
+
+
+@asset_check(asset=parsed_filings, description="No schema version leaves a matching field empty far more often than earlier versions.")
+def schema_drift(pg: PostgresResource) -> AssetCheckResult:
+    empties = ", ".join(f"count(*) FILTER (WHERE {f} IS NULL)" for f in DRIFT_FIELDS)
+    with pg.connect() as conn:
+        rows = conn.execute(
+            f"SELECT return_type, return_version, count(*), {empties} FROM filings GROUP BY 1, 2"
+        ).fetchall()
+    jumps = empty_rate_jumps([(t, v, n, dict(zip(DRIFT_FIELDS, e))) for t, v, n, *e in rows])
+    return AssetCheckResult(
+        passed=not jumps,
+        metadata={
+            "versions": len(rows),
+            "jumps": "; ".join(f"{t} {v or 'no version'} {f}: {rate:.0%} empty, {earlier:.0%} before"
+                               for t, v, f, rate, earlier in jumps) or "none",
+        },
+    )
 
 
 @asset_check(asset=school_matches, description="No support group (booster, PTA, alumni) is a verified match.")
@@ -257,3 +338,4 @@ def known_managers_named(pg: PostgresResource) -> AssetCheckResult:
         metadata={"problems": "; ".join(problems) or "none", "delegating_returns": delegating,
                   "delegating_with_named_evidence": named},
     )
+

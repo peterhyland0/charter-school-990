@@ -12,6 +12,9 @@ What was decided, why, and what it costs. Numbers are from the current national 
   - **Named as a school's holder outside the IRS data** (see "Outside evidence"). This added 131 nonprofits the first two routes missed.
 
   Support groups like boosters and PTAs are left out, because they share a school's name but don't run it. The result is 57,155 nonprofits and 27,125 parsed returns.
+- **The IRS changes the return format most years** (11 schema versions in the current data). The parser tries the current element name first, then older ones. A renamed field wouldn't raise an error, only come back empty, so two checks watch for it:
+  - parse failures above 1%;
+  - a schema version where a field used for matching (name, address, phone, website, the delegation answer) is empty 50 points more often than on earlier versions. Versions already differ by up to 35 points.
 
 ## Matching
 
@@ -71,7 +74,7 @@ A 990 never says which charter schools its filer holds, so a school stays unmatc
 
 ## Stack
 
-- **Python and Dagster, Postgres, and Next.js with TypeScript,** as in the job description, hosted on Neon and Vercel. Dagster provides reruns, 9 loud checks and a monthly schedule. A rerun fetches only returns it hasn't seen.
+- **Python and Dagster, Postgres, and Next.js with TypeScript,** as in the job description, hosted on Neon and Vercel. Dagster provides reruns, 12 loud checks and a monthly schedule. A rerun fetches only returns it hasn't seen.
 - **Live layout:**
   - **Neon and Vercel** are both in US East, for fast pages.
   - **The monthly Dagster job is ready to deploy** to a small EU server (`deploy/setup.sh`, systemd units, the schedule switched on by one setting). That costs a fraction of a US server, and its SQL runs inside Neon either way.

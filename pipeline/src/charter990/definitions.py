@@ -20,6 +20,8 @@ from .checks import (
     match_rate,
     no_support_groups_verified,
     operating_school_count,
+    parse_failure_rate,
+    schema_drift,
     success_return_located,
     umbrella_watch,
 )
@@ -48,6 +50,8 @@ defs = Definitions(
         known_managers_named,
         success_return_located,
         fetch_failure_rate,
+        parse_failure_rate,
+        schema_drift,
         no_support_groups_verified,
         match_rate,
         corrections_hold,
