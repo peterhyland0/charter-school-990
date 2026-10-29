@@ -162,7 +162,9 @@ export async function listSchools(
     ),
     page AS (
       SELECT * FROM matched
-      ORDER BY is_operating DESC, st, sch_name, ncessch
+      -- Names in ICU order, which ignores capitals: Neon's database sorts by
+      -- character code, which put every all-caps name before mixed case.
+      ORDER BY is_operating DESC, st, sch_name COLLATE "und-x-icu", ncessch
       ${limit ? sql`LIMIT ${limit} OFFSET ${offset}` : sql``}
     )
     SELECT p.*, lp.name AS leader_name, lp.title AS leader_title, lp.total::text AS leader_pay,
@@ -181,7 +183,7 @@ export async function listSchools(
       WHERE x.total > 0
       ORDER BY x.total DESC, x.seq LIMIT 1
     ) lp ON true
-    ORDER BY p.is_operating DESC, p.st, p.sch_name, p.ncessch`;
+    ORDER BY p.is_operating DESC, p.st, p.sch_name COLLATE "und-x-icu", p.ncessch`;
   const total = result.length ? Number(result[0].total) : 0;
   return { rows: result.filter((r): r is ListRow => r.ncessch !== null), total };
 }
@@ -213,7 +215,7 @@ export async function suggest(q: string, st: string): Promise<{ schools: SchoolS
       WHERE s.sch_name ILIKE ${contains}
         ${st ? sql`AND s.st = ${st}` : sql``}
       ORDER BY CASE WHEN s.sch_name ILIKE ${starts} THEN 0 WHEN s.sch_name ILIKE ${wordStarts} THEN 1 ELSE 2 END,
-               s.is_operating DESC, s.sch_name
+               s.is_operating DESC, s.sch_name COLLATE "und-x-icu"
       LIMIT 6`,
     sql<{ name: string; schools: string }[]>`
       WITH names AS (
