@@ -6,6 +6,7 @@ import { compactMoney, day, formatEin, money, month, nextReturn, propublicaUrl }
 import { reasonText, ROLE_LABEL, SIGNAL_LABEL, STATUS_CLASS, STATUS_LABEL } from "@/lib/labels";
 import { FULL_CARD, schoolProfile, type Contractor, type Match, type Person, type Related } from "@/lib/schools";
 import { RememberView } from "../../recently-viewed";
+import MoreRows from "./more-rows";
 
 // Where each fact sits on the return, so a rep can check it.
 const LINES = {
@@ -16,6 +17,60 @@ const LINES = {
 const EXPLANATION_PREVIEW = 280;
 // Network members shown before "and N more".
 const NETWORK_PREVIEW = 8;
+// Leaders shown before "Show N more people"; the best paid come first.
+const LEADERS_PREVIEW = 10;
+
+function LeaderRow({ p }: { p: Person }) {
+  return (
+    <tr>
+      <td className="py-1 pr-3">{p.name}</td>
+      <td className="py-1 pr-3">{p.title}</td>
+      <td className="py-1 pr-3 text-right">{p.avg_hours ? Number(p.avg_hours) : "—"}</td>
+      <td className="py-1 pr-3 text-right">{money(p.comp_org)}</td>
+      <td className="py-1 pr-3 text-right">{money(p.comp_related)}</td>
+      <td className="py-1 pr-3 text-right">{money(p.comp_other)}</td>
+      <td className="py-1 text-right font-medium">{money(p.total)}</td>
+    </tr>
+  );
+}
+
+// The arrow on a folded section, turned down when it's open. The <details>
+// around it needs the group class.
+function FoldChevron() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      className="size-3.5 text-muted transition-transform group-open:rotate-90"
+      aria-hidden="true"
+    >
+      <path d="m6 3.5 4.5 4.5L6 12.5" />
+    </svg>
+  );
+}
+
+// Links to the parts of the page, held under the top edge while it scrolls.
+function SectionLinks({ links }: { links: [id: string, label: string][] }) {
+  return (
+    <nav aria-label="On this page" className="sticky top-0 z-10 -mx-4 mt-5 border-b border-line bg-page/95 px-4 backdrop-blur">
+      {/* On a phone the row scrolls sideways; the cut-off last link shows it, so no scrollbar. */}
+      <ul className="flex gap-1 overflow-x-auto py-2 text-sm whitespace-nowrap [scrollbar-width:none]">
+        {links.map(([id, label]) => (
+          <li key={id}>
+            <a
+              href={`#${id}`}
+              className="block max-w-64 truncate rounded-sm px-2.5 py-1 text-muted hover:bg-accent-soft hover:text-accent"
+            >
+              {label}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
 
 // What Schedule R says about one related organization, and which return says it.
 function relatedDetail(r: Related): string {
@@ -272,6 +327,20 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
   const operator = operatorMatches[0];
   const network = related.filter((r) => r.kind === "network");
 
+  // One link per part of the first card, then one per other nonprofit's card.
+  const links: [string, string][] = [];
+  const first = cards[0];
+  if (first) {
+    links.push(["finances", "Finances"]);
+    if (first.role === "operator") links.push(["management", "Management company"]);
+    if (first.role === "operator" && network.some((r) => r.ein === first.ein)) links.push(["network", "Network"]);
+    links.push(["leaders", "Leaders and pay"], ["evidence", "How we matched this"]);
+    for (const m of cards.slice(1)) {
+      links.push([`org-${m.ein}`, m.role === "management" ? "Management organization" : (m.org_name ?? "Another nonprofit")]);
+    }
+  }
+  if (others.length > 0) links.push(["also-linked", "Also linked"]);
+
   return (
     <main>
       <RememberView
@@ -320,6 +389,8 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
         />
       )}
 
+      {links.length > 1 && <SectionLinks links={links} />}
+
       {matches.length === 0 && (
         <section className="mt-6 rounded-md border border-line bg-surface p-5">
           <h2 className="font-semibold">No nonprofit matched</h2>
@@ -336,15 +407,21 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
         </p>
       )}
 
-      {cards.map((m) => {
+      {cards.map((m, i) => {
         const rows = people.filter((p) => p.object_id === m.object_id);
         const filedContractors = contractors.filter((c) => c.object_id === m.object_id);
         const members = network.filter((r) => r.ein === m.ein);
         const lines = m.return_type === "990EZ" ? LINES["990EZ"] : LINES["990"];
         const next = nextReturn(m.tax_period_end);
         const correction = m.evidence.correction;
+        // The section links point into the first card, so only its parts get ids.
+        const anchor = (name: string) => (i === 0 ? name : undefined);
         return (
-          <section key={m.ein} className="mt-6 rounded-md border border-line bg-surface p-5">
+          <section
+            key={m.ein}
+            id={i === 0 ? undefined : `org-${m.ein}`}
+            className="mt-6 scroll-mt-16 rounded-md border border-line bg-surface p-5"
+          >
             <p className="text-xs font-medium uppercase tracking-wide text-muted">{ROLE_LABEL[m.role]}</p>
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h2 className="text-lg font-semibold">{m.org_name}</h2>
@@ -369,20 +446,10 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
               {m.filer_state && ` · registered in ${m.filer_state}`}
               {m.filer_state && m.filer_state !== school.st && " (out of state)"}
             </p>
-            <ul className="mt-2 text-sm">
-              {m.signals.map((sig) => {
-                // A signal without a detail line yet shows its name alone, not a dangling colon.
-                const detail = signalDetail(sig, m.evidence[sig]);
-                return (
-                  <li key={sig}>
-                    <span className="font-medium">{SIGNAL_LABEL[sig] ?? sig}</span>
-                    {detail && `: ${detail}`}
-                  </li>
-                );
-              })}
-            </ul>
-
-            <p className="mt-4 text-sm">
+            <h3 id={anchor("finances")} className="mt-5 scroll-mt-16 font-medium">
+              Finances
+            </h3>
+            <p className="text-sm">
               <span className="text-muted">Covers</span> {day(m.tax_period_begin)} – {day(m.tax_period_end)}
               {next && <span className="text-muted"> · {nextReturnText(next)}</span>}
             </p>
@@ -405,7 +472,7 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
             </dl>
 
             {m.role === "operator" && (
-              <section className="mt-4">
+              <section id={anchor("management")} className="mt-5 scroll-mt-16">
                 <h3 className="font-medium">Management company</h3>
                 <ManagementCompany
                   m={m}
@@ -417,7 +484,7 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
             )}
 
             {m.role === "operator" && members.length > 0 && (
-              <section className="mt-4 text-sm">
+              <section id={anchor("network")} className="mt-5 scroll-mt-16 text-sm">
                 <h3 className="font-medium">
                   Network <span className="text-xs font-normal text-muted">Schedule R</span>
                 </h3>
@@ -433,7 +500,9 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
               </section>
             )}
 
-            <h3 className="mt-5 font-medium">Leaders and pay</h3>
+            <h3 id={anchor("leaders")} className="mt-5 scroll-mt-16 font-medium">
+              Leaders and pay
+            </h3>
             {rows.length === 0 ? (
               <p className="text-sm text-muted">This return lists no officers or key employees.</p>
             ) : (
@@ -451,28 +520,33 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-line">
-                    {rows.map((p, i) => (
-                      <tr key={i}>
-                        <td className="py-1 pr-3">{p.name}</td>
-                        <td className="py-1 pr-3">{p.title}</td>
-                        <td className="py-1 pr-3 text-right">{p.avg_hours ? Number(p.avg_hours) : "—"}</td>
-                        <td className="py-1 pr-3 text-right">{money(p.comp_org)}</td>
-                        <td className="py-1 pr-3 text-right">{money(p.comp_related)}</td>
-                        <td className="py-1 pr-3 text-right">{money(p.comp_other)}</td>
-                        <td className="py-1 text-right font-medium">{money(p.total)}</td>
-                      </tr>
+                    {rows.slice(0, LEADERS_PREVIEW).map((p, i) => (
+                      <LeaderRow key={i} p={p} />
                     ))}
+                    {rows.length > LEADERS_PREVIEW && (
+                      <MoreRows hidden={rows.length - LEADERS_PREVIEW} columns={7} noun="people">
+                        {rows.slice(LEADERS_PREVIEW).map((p, i) => (
+                          <LeaderRow key={i} p={p} />
+                        ))}
+                      </MoreRows>
+                    )}
                   </tbody>
                 </table>
               </div>
             )}
 
             {filedContractors.length > 0 && (
-              <details className="mt-4 text-sm">
-                <summary className="cursor-pointer font-medium">
-                  Largest contractors ({filedContractors.length}) <span className="text-xs font-normal text-muted">Part VII, Section B</span>
+              <details className="group mt-5 rounded-md border border-line text-sm">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-2.5 hover:bg-accent-soft/40">
+                  <span className="flex items-center gap-2 font-medium">
+                    <FoldChevron />
+                    Largest contractors
+                  </span>
+                  <span className="text-muted">
+                    {filedContractors.length} listed · Part VII, Section B
+                  </span>
                 </summary>
-                <ul className="mt-1 space-y-0.5">
+                <ul className="space-y-0.5 border-t border-line px-4 py-3">
                   {filedContractors.map((c, i) => (
                     <li key={i}>
                       {c.name} · {c.services?.toLowerCase()} · {money(c.compensation)}
@@ -482,6 +556,36 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
                 </ul>
               </details>
             )}
+
+            {/* The evidence for the link, folded so the answer comes first. Open
+                when several nonprofits tie, since the reader has to compare them. */}
+            <details
+              id={anchor("evidence")}
+              open={operators > 1}
+              className="group mt-5 scroll-mt-16 rounded-md border border-line"
+            >
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-2.5 text-sm hover:bg-accent-soft/40">
+                <span className="flex items-center gap-2 font-medium">
+                  <FoldChevron />
+                  How we matched this
+                </span>
+                <span className="text-muted">
+                  {m.signals.length} {m.signals.length === 1 ? "piece of evidence" : "pieces of evidence"}
+                </span>
+              </summary>
+              <ul className="space-y-1 border-t border-line px-4 py-3 text-sm">
+                {m.signals.map((sig) => {
+                  // A signal without a detail line yet shows its name alone, not a dangling colon.
+                  const detail = signalDetail(sig, m.evidence[sig]);
+                  return (
+                    <li key={sig}>
+                      <span className="font-medium">{SIGNAL_LABEL[sig] ?? sig}</span>
+                      {detail && `: ${detail}`}
+                    </li>
+                  );
+                })}
+              </ul>
+            </details>
 
             <p className="mt-4 text-xs text-muted">
               Source: IRS Form {m.return_type === "990EZ" ? "990-EZ" : "990"}
@@ -495,7 +599,7 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
       })}
 
       {others.length > 0 && (
-        <section className="mt-6">
+        <section id="also-linked" className="mt-6 scroll-mt-16">
           <h2 className="font-semibold">Also linked</h2>
           <p className="text-sm text-muted">Other nonprofits the evidence connects to this school, and how.</p>
           <div className="mt-2 overflow-x-auto">
