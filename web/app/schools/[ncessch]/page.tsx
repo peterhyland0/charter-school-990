@@ -153,9 +153,52 @@ function signalDetail(signal: string, e: Record<string, string | number | null> 
       return `"${e.filing}" is the nonprofit on ${e.domain} whose name matches this school (similarity ${e.similarity})`;
     case "district_group":
       return `${e.verified_schools} other school${e.verified_schools === 1 ? "" : "s"} in ${e.district} verified to this nonprofit`;
+    case "name_state":
+      return `"${e.filing}" in ${e.filing_city} vs "${e.school}" in ${e.school_city} (similarity ${e.similarity})`;
+    case "audit":
+      return `${e.audit_year} audit of "${e.auditee}" under this EIN, ${
+        e.same_street ? "at the school's street address" : `in ${e.city}`
+      } (similarity ${e.similarity})`;
+    case "holder": {
+      const source = HOLDER_SOURCE[String(e.source)] ?? "a charter-holder record";
+      return e.ein
+        ? `${source} gives EIN ${formatEin(String(e.ein))}, which files as "${e.filing}"`
+        : `${source} names "${e.holder}" vs "${e.filing}" (similarity ${e.similarity})`;
+    }
+    case "brand_group":
+      return `"${e.filing}" runs ${e.campuses} of the ${e.siblings} other ${e.brand} campuses in this state`;
+    case "adjudicated":
+      return adjudicatedDetail(e as unknown as Adjudication);
     default:
       return "";
   }
+}
+
+// Where a charter-holder record came from (pipeline/src/charter990/assets/external.py).
+const HOLDER_SOURCE: Record<string, string> = {
+  tx_tea: "the Texas Education Agency's charter holder report",
+  la_doe: "the Louisiana Department of Education's charter list",
+  az_ccd: "Arizona's charter holder district",
+  fl_ag: "the school's audit filed with the Florida Auditor General",
+  fl_sunbiz: "Florida's business registry",
+  website: "the school's own website",
+};
+
+type Pick = { reason?: string; confidence?: number };
+type Adjudication = { method?: string; scored?: Pick; jev?: Pick };
+
+// Who picked this nonprofit among close candidates, how sure each was, and why.
+function adjudicatedDetail(a: Adjudication): string {
+  const sure = (p?: Pick) => (p?.confidence === undefined ? "" : ` (${Math.round(p.confidence * 100)}% sure)`);
+  const who =
+    a.method === "both"
+      ? `the scored model${sure(a.scored)} and Jev${sure(a.jev)} both picked it`
+      : a.method === "jev"
+        ? `Jev picked it${sure(a.jev)}`
+        : `the scored model picked it${sure(a.scored)}`;
+  // Jev's reason is plain English; the scored model's lists feature weights.
+  const reason = a.method === "scored" ? a.scored?.reason : (a.jev?.reason ?? a.scored?.reason);
+  return reason ? `${who}. ${reason}` : who;
 }
 
 // The management tile: the named company if the evidence names one, else what
@@ -327,11 +370,16 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
               {m.filer_state && m.filer_state !== school.st && " (out of state)"}
             </p>
             <ul className="mt-2 text-sm">
-              {m.signals.map((sig) => (
-                <li key={sig}>
-                  <span className="font-medium">{SIGNAL_LABEL[sig] ?? sig}:</span> {signalDetail(sig, m.evidence[sig])}
-                </li>
-              ))}
+              {m.signals.map((sig) => {
+                // A signal without a detail line yet shows its name alone, not a dangling colon.
+                const detail = signalDetail(sig, m.evidence[sig]);
+                return (
+                  <li key={sig}>
+                    <span className="font-medium">{SIGNAL_LABEL[sig] ?? sig}</span>
+                    {detail && `: ${detail}`}
+                  </li>
+                );
+              })}
             </ul>
 
             <p className="mt-4 text-sm">
