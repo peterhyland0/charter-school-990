@@ -2,10 +2,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import { Suspense } from "react";
-import { compactMoney, day, formatEin, money, month, nextReturn, propublicaUrl } from "@/lib/format";
+import { day, formatEin, money, month, nextReturn, propublicaUrl } from "@/lib/format";
 import { reasonText, ROLE_LABEL, SIGNAL_LABEL, STATUS_CLASS, STATUS_LABEL } from "@/lib/labels";
 import { FULL_CARD, schoolProfile, type Contractor, type Match, type Person, type Related } from "@/lib/schools";
+import { namedManagers, schoolSummary } from "@/lib/summary";
 import { RememberView } from "../../recently-viewed";
+import SummaryTiles from "../../summary-tiles";
 import MoreRows from "./more-rows";
 
 // Where each fact sits on the return, so a rep can check it.
@@ -99,16 +101,6 @@ function nextReturnText(next: NonNullable<ReturnType<typeof nextReturn>>): strin
     return `${year} was due ${day(next.due)}; with the usual extension it is due ${day(next.extended)}. It isn't in IRS data yet.`;
   }
   return `${year} was due by ${day(next.extended)} at the latest, but isn't in IRS data yet.`;
-}
-
-// The management organizations the evidence names: a management contractor on
-// the return, the linked management nonprofit, or Schedule R.
-function namedManagers(contractors: Contractor[], managers: Match[], related: Related[]): string[] {
-  return [...new Set([
-    ...contractors.filter((c) => c.is_management).map((c) => c.name),
-    ...managers.map((x) => x.org_name),
-    ...related.filter((r) => r.kind === "management").map((r) => r.related_name),
-  ].filter((name): name is string => Boolean(name)))];
 }
 
 // The management answer from four sources on the returns, plus the matcher's
@@ -256,62 +248,6 @@ function adjudicatedDetail(a: Adjudication): string {
   return reason ? `${who}. ${reason}` : who;
 }
 
-// The management tile: the named company if the evidence names one, else what
-// Part VI, line 3 says.
-function managementTile(m: Match, named: string[]): [string, string] {
-  if (m.return_type === "990EZ") return ["Not asked", "Form 990-EZ has no such question"];
-  if (named.length) {
-    return [named.join(" and "), m.mgmt_delegated ? "The return says management is delegated" : "Named in the evidence below"];
-  }
-  if (m.mgmt_delegated) return ["Delegated, not named", "The return says management is delegated"];
-  return [m.mgmt_delegated === false ? "None reported" : "Not answered", "Part VI, line 3 of the return"];
-}
-
-// The answers a rep came for, at a glance, from the operator's latest return.
-// The cards below hold the evidence and the line each figure comes from.
-function SummaryTiles({ m, operators, people, contractors, managers, related }: {
-  m: Match; operators: number; people: Person[]; contractors: Contractor[]; managers: Match[]; related: Related[];
-}) {
-  // Volunteers (all pay zero) don't count, as in the school list.
-  const leader = people.find((p) => p.object_id === m.object_id && Number(p.total) > 0);
-  const listed = people.some((p) => p.object_id === m.object_id);
-  const tiles: [string, string, string][] = [
-    [
-      "Run by",
-      m.org_name ?? "—",
-      operators > 1 ? `Or ${operators - 1} other ${operators === 2 ? "nonprofit" : "nonprofits"}, see below` : `EIN ${formatEin(m.ein)}`,
-    ],
-    ["Revenue", compactMoney(m.total_revenue), `Net assets ${compactMoney(m.net_assets)}`],
-    [
-      "Top-paid leader",
-      leader ? compactMoney(leader.total) : listed ? "None paid" : "—",
-      leader
-        ? [leader.name, leader.title].filter(Boolean).join(", ")
-        : listed ? "The return lists only unpaid officers" : "The return lists no officers",
-    ],
-    ["Management company", ...managementTile(m, namedManagers(contractors, managers, related))],
-  ];
-  return (
-    <section className="mt-5">
-      <dl className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-        {tiles.map(([label, value, hint]) => (
-          <div key={label} className="rounded-md border border-line bg-surface px-4 py-3">
-            <dt className="text-xs text-muted">{label}</dt>
-            <dd className="mt-0.5 font-semibold break-words">{value}</dd>
-            <dd className="mt-0.5 text-xs text-muted">{hint}</dd>
-          </div>
-        ))}
-      </dl>
-      <p className="mt-2 text-xs text-muted">
-        From the Form {m.return_type === "990EZ" ? "990-EZ" : "990"} for the year ending {month(m.tax_period_end)}.{" "}
-        <a href={propublicaUrl(m.ein, m.object_id)} className="text-accent-strong underline" target="_blank" rel="noreferrer">
-          View the return
-        </a>
-      </p>
-    </section>
-  );
-}
-
 async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]">["params"] }) {
   await connection();
   const { ncessch } = await params;
@@ -324,7 +260,7 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
   const managers = matches.filter((m) => m.role === "management");
   const operatorMatches = matches.filter((m) => m.role === "operator");
   const operators = operatorMatches.length;
-  const operator = operatorMatches[0];
+  const summary = schoolSummary(profile);
   const network = related.filter((r) => r.kind === "network");
 
   // One link per part of the first card, then one per other nonprofit's card.
@@ -378,15 +314,12 @@ async function SchoolDetail({ params }: { params: PageProps<"/schools/[ncessch]"
         {!school.is_operating && " · not operating"}
       </p>
 
-      {operator && (
-        <SummaryTiles
-          m={operator}
-          operators={operators}
-          people={people}
-          contractors={contractors.filter((c) => c.object_id === operator.object_id)}
-          managers={managers}
-          related={related.filter((r) => r.ein === operator.ein)}
-        />
+      {/* The answers at a glance; the cards below hold the evidence and the
+          line each figure comes from. */}
+      {summary && (
+        <section className="mt-5">
+          <SummaryTiles summary={summary} />
+        </section>
       )}
 
       {links.length > 1 && <SectionLinks links={links} />}

@@ -2,10 +2,10 @@ import Link from "next/link";
 import { connection } from "next/server";
 import { Suspense } from "react";
 import { sql } from "@/lib/db";
-import { STATUS_CLASS, STATUS_LABEL } from "@/lib/labels";
 import { describePlaces, listSchools, parseFilters, stateCodes } from "@/lib/schools";
 import RecentlyViewed from "./recently-viewed";
 import SearchBox from "./search-box";
+import SearchResults from "./search-results";
 
 const LIMIT = 50;
 
@@ -101,47 +101,20 @@ async function Results({ searchParams }: { searchParams: PageProps<"/">["searchP
           No schools match{st && ` in ${st}`}.
         </p>
       ) : (
-        <ul className="divide-y divide-line rounded-md border border-line bg-surface">
-          {rows.map((r) => (
-            <li key={r.ncessch}>
-              <Link
-                href={`/schools/${r.ncessch}`}
-                className="group flex items-center justify-between gap-3 px-4 py-3 hover:bg-accent-soft/50"
-              >
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium group-hover:text-accent">{r.sch_name}</span>
-                    {r.status && (
-                      <span className={`rounded-sm px-1.5 py-0.5 text-xs font-medium ${STATUS_CLASS[r.status]}`}>
-                        {STATUS_LABEL[r.status]}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-sm text-muted">
-                    {[
-                      `${r.lcity}, ${r.st}`,
-                      !r.is_operating && "not operating",
-                      r.operators ? `Run by ${r.operators}` : r.is_operating && "No nonprofit matched",
-                      r.managers && `Managed by ${r.managers}`,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </div>
-                </div>
-                <svg
-                  viewBox="0 0 16 16"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  className="size-4 shrink-0 text-gray-300 group-hover:text-accent"
-                  aria-hidden="true"
-                >
-                  <path d="m6 3.5 4.5 4.5L6 12.5" />
-                </svg>
-              </Link>
-            </li>
-          ))}
-        </ul>
+        // Keyed by the search, so a new search starts back at the first result.
+        <SearchResults
+          key={`${q}|${st}`}
+          rows={rows.map((r) => ({
+            ncessch: r.ncessch,
+            sch_name: r.sch_name,
+            lcity: r.lcity,
+            st: r.st,
+            is_operating: r.is_operating,
+            status: r.status,
+            operators: r.operators,
+            managers: r.managers,
+          }))}
+        />
       )}
     </section>
   );
