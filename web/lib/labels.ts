@@ -7,9 +7,9 @@ export const STATUS_LABEL: Record<Status, string> = {
 };
 
 export const STATUS_CLASS: Record<Status, string> = {
-  verified: "bg-emerald-600/15 text-emerald-700 dark:text-emerald-300",
-  likely: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
-  unmatched: "bg-black/5 text-black/60 dark:bg-white/10 dark:text-white/60",
+  verified: "bg-green-100 text-green-800",
+  likely: "bg-amber-100 text-amber-800",
+  unmatched: "bg-gray-100 text-gray-600",
 };
 
 export const SIGNAL_LABEL: Record<string, string> = {

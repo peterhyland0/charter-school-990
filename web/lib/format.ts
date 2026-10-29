@@ -8,6 +8,17 @@ export function money(value: string | number | null | undefined): string {
   }).format(Number(value));
 }
 
+// Short form for headline figures: $479.4M, $615.1K.
+export function compactMoney(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(Number(value));
+}
+
 // Dates are shown in UTC: return dates are calendar dates without a time zone.
 function formatDate(value: Date | string | null | undefined, options: Intl.DateTimeFormatOptions): string {
   if (!value) return "—";

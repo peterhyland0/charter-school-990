@@ -135,14 +135,14 @@ export default function SearchBox({
         role="listbox"
         aria-label="Suggestions"
         hidden={!shown}
-        className="absolute inset-x-0 top-full z-10 mt-1 max-h-[min(28rem,60vh)] overflow-y-auto rounded border border-black/20 bg-background py-1 shadow-lg dark:border-white/25"
+        className="absolute inset-x-0 top-full z-10 mt-1 max-h-[min(28rem,60vh)] overflow-y-auto rounded-md border border-line bg-surface py-1 shadow-lg"
       >
         {GROUPS.map((group) => {
           const members = items.map((item, i) => ({ item, i })).filter(({ item }) => item.kind === group.kind);
           if (!members.length) return null;
           return (
             <div key={group.kind} role="group" aria-labelledby={`${id}-${group.kind}`}>
-              <div id={`${id}-${group.kind}`} role="presentation" className="px-3 pt-2 pb-1 text-xs opacity-60">
+              <div id={`${id}-${group.kind}`} role="presentation" className="px-3 pt-2 pb-1 text-xs text-muted">
                 {group.label}
               </div>
               {members.map(({ item, i }) => (
@@ -156,13 +156,13 @@ export default function SearchBox({
                   onMouseEnter={() => setActive(i)}
                   onClick={() => choose(item)}
                   className={`flex cursor-pointer items-baseline justify-between gap-3 px-3 py-1.5 ${
-                    i === active ? "bg-black/5 dark:bg-white/10" : ""
+                    i === active ? "bg-accent-soft" : ""
                   }`}
                 >
                   {item.kind === "school" ? (
                     <>
                       <span className="truncate">{item.school.sch_name}</span>
-                      <span className="shrink-0 text-sm opacity-70">
+                      <span className="shrink-0 text-sm text-muted">
                         {[`${item.school.lcity}, ${item.school.st}`, !item.school.is_operating && "not operating"]
                           .filter(Boolean)
                           .join(" · ")}
@@ -171,7 +171,7 @@ export default function SearchBox({
                   ) : (
                     <>
                       <span className="truncate">{item.org.name}</span>
-                      <span className="shrink-0 text-sm opacity-70">
+                      <span className="shrink-0 text-sm text-muted">
                         {item.org.schools.toLocaleString("en-US")} {item.org.schools === 1 ? "school" : "schools"}
                       </span>
                     </>
