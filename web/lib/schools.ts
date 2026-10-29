@@ -57,8 +57,12 @@ export function filterQuery(filters: Filters, extra: Record<string, string> = {}
 }
 
 // Treat the user's % and _ as literal characters, not LIKE wildcards.
+function likeEscape(q: string): string {
+  return q.replace(/[\\%_]/g, "\\$&");
+}
+
 function likePattern(q: string): string {
-  return `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+  return `%${likeEscape(q)}%`;
 }
 
 // --- List ----------------------------------------------------------------------
@@ -187,6 +191,55 @@ export const stateCodes = cache(async (): Promise<string[]> => {
   const rows = await sql<{ st: string }[]>`SELECT DISTINCT st FROM schools WHERE is_operating ORDER BY st`;
   return rows.map((r) => r.st);
 });
+
+// --- Suggestions ----------------------------------------------------------------
+
+export type SchoolSuggestion = { ncessch: string; sch_name: string; lcity: string | null; st: string; is_operating: boolean };
+export type OrgSuggestion = { name: string; schools: number };
+
+// What the home search box offers as you type: schools by name, and the
+// nonprofits and management companies behind them, matched on the same names
+// listSchools searches so picking one finds the schools it promised. Names
+// starting with the text come first, then names with a word starting with it.
+export async function suggest(q: string, st: string): Promise<{ schools: SchoolSuggestion[]; orgs: OrgSuggestion[] }> {
+  const term = likeEscape(q);
+  const contains = `%${term}%`;
+  const starts = `${term}%`;
+  const wordStarts = `% ${term}%`;
+  const [schools, orgs] = await Promise.all([
+    sql<SchoolSuggestion[]>`
+      SELECT s.ncessch, s.sch_name, s.lcity, s.st, s.is_operating
+      FROM schools s
+      WHERE s.sch_name ILIKE ${contains}
+        ${st ? sql`AND s.st = ${st}` : sql``}
+      ORDER BY CASE WHEN s.sch_name ILIKE ${starts} THEN 0 WHEN s.sch_name ILIKE ${wordStarts} THEN 1 ELSE 2 END,
+               s.is_operating DESC, s.sch_name
+      LIMIT 6`,
+    sql<{ name: string; schools: string }[]>`
+      WITH names AS (
+        SELECT nf.org_name AS name, m.ncessch FROM school_matches m JOIN filings nf ON nf.object_id = m.object_id
+         WHERE m.role IN ('operator', 'management') AND nf.org_name ILIKE ${contains}
+        UNION ALL
+        SELECT nf.dba_name, m.ncessch FROM school_matches m JOIN filings nf ON nf.object_id = m.object_id
+         WHERE m.role IN ('operator', 'management') AND nf.dba_name ILIKE ${contains}
+        UNION ALL
+        SELECT c.name, m.ncessch FROM school_matches m JOIN filing_contractors c ON c.object_id = m.object_id
+         WHERE m.role = 'operator' AND c.is_management AND c.name ILIKE ${contains}
+        UNION ALL
+        SELECT l.related_name, m.ncessch FROM school_matches m JOIN related_links l ON l.ein = m.ein
+         WHERE m.role = 'operator' AND l.kind = 'management' AND l.related_name ILIKE ${contains}
+      )
+      -- The same name in different capitals is one organization.
+      SELECT min(n.name) AS name, count(DISTINCT n.ncessch) AS schools
+      FROM names n JOIN schools s ON s.ncessch = n.ncessch
+      ${st ? sql`WHERE s.st = ${st}` : sql``}
+      GROUP BY upper(n.name)
+      ORDER BY min(CASE WHEN n.name ILIKE ${starts} THEN 0 WHEN n.name ILIKE ${wordStarts} THEN 1 ELSE 2 END),
+               count(DISTINCT n.ncessch) DESC, min(n.name)
+      LIMIT 4`,
+  ]);
+  return { schools, orgs: orgs.map((o) => ({ name: o.name, schools: Number(o.schools) })) };
+}
 
 // The data changes when the monthly pipeline runs, so the API lets Vercel's CDN
 // serve repeat requests for an hour (and a stale copy for a day while it

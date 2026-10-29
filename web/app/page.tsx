@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { sql } from "@/lib/db";
 import { STATUS_CLASS, STATUS_LABEL } from "@/lib/labels";
 import { describePlaces, listSchools, parseFilters, stateCodes } from "@/lib/schools";
+import SearchBox from "./search-box";
 
 const LIMIT = 50;
 
@@ -54,11 +55,11 @@ async function Search({ searchParams }: { searchParams: PageProps<"/">["searchPa
   return (
     <>
       <form method="get" className="flex flex-wrap gap-2">
-        <input
-          name="q"
+        <SearchBox
+          key={q}
           defaultValue={q}
           placeholder="School, district, city, nonprofit or management company"
-          className="min-w-0 flex-1 rounded border border-black/20 bg-transparent px-3 py-2 dark:border-white/25"
+          className="rounded border border-black/20 bg-transparent px-3 py-2 dark:border-white/25"
         />
         <select
           name="st"
