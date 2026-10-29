@@ -97,7 +97,7 @@ Of the 2,019 unmatched schools, 828 are expected to have no nonprofit: district-
 
 ## Lists and exports
 
-- **One query serves the list page, the CSV and the JSON,** one row per school, so they can't disagree. Search also matches the nonprofit and management company behind a school ("Academica" finds 68).
+- **One query serves the list page, the CSV and the JSON,** one row per school, so they can't disagree. Search also matches the nonprofit and management company behind a school ("Academica" finds 199).
 - **The CSV is spreadsheet-safe:** formula-like cells are guarded, and Excel reads accents. "Top-paid leader" skips unpaid board members, who are often the only people listed when a management company employs the staff.
 
 ## Corrections
