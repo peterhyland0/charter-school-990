@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
+import { InterfereProvider } from "@interfere/next/provider";
 import SiteNav from "./site-nav";
 import "./globals.css";
 
@@ -22,6 +23,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col bg-page font-sans text-ink">
+        <InterfereProvider>
         <header className="border-b border-line bg-surface">
           <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-4 px-4 py-3">
             <Link href="/" className="flex items-center gap-2 font-semibold whitespace-nowrap">
@@ -41,6 +43,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             Sources: IRS Form 990 e-filings and the NCES Common Core of Data. Each school&apos;s figures link to the return they came from.
           </p>
         </footer>
+        </InterfereProvider>
       </body>
     </html>
   );

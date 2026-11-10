@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@interfere/next": "^12.4.4",
     "@neon/config": "^1.9.5",
     "next": "16.4.3",
     "postgres": "^3.4.9",
